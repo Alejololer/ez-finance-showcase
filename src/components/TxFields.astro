@@ -1,0 +1,47 @@
+---
+// Campos de una transacción (gasto/ingreso). Cuenta única → input oculto, no un select.
+import { today } from '../lib/money';
+
+interface Props {
+  accounts: { id: number; name: string }[];
+  categories: { id: number; name: string }[];
+  values?: { kind?: string; amount_cents?: number; date?: string; account_id?: number; category_id?: number | null; merchant?: string | null };
+  errors?: Record<string, string[] | undefined>;
+}
+const { accounts, categories, values = {}, errors = {} } = Astro.props;
+const amount = values.amount_cents ? (Math.abs(values.amount_cents) / 100).toFixed(2) : '';
+const kind = values.kind ?? (values.amount_cents && values.amount_cents > 0 ? 'income' : 'expense');
+---
+<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+  <label class="label">Tipo
+    <select class="input" name="kind">
+      <option value="expense" selected={kind === 'expense'}>Gasto</option>
+      <option value="income" selected={kind === 'income'}>Ingreso</option>
+    </select>
+  </label>
+  <label class="label">Monto
+    <input class="input" name="amount" inputmode="decimal" required pattern="\d+([.,]\d{1,2})?" placeholder="0.00" value={amount} />
+    {errors.amount && <span class="error">{errors.amount[0]}</span>}
+  </label>
+  <label class="label">Fecha
+    <input class="input" type="date" name="date" required value={values.date ?? today()} />
+  </label>
+  {accounts.length === 1 ? (
+    <input type="hidden" name="account_id" value={accounts[0].id} />
+  ) : (
+    <label class="label">Cuenta
+      <select class="input" name="account_id" required>
+        {accounts.map((a) => <option value={a.id} selected={a.id === values.account_id}>{a.name}</option>)}
+      </select>
+    </label>
+  )}
+  <label class="label">Categoría
+    <select class="input" name="category_id">
+      <option value="">Sin categoría</option>
+      {categories.map((c) => <option value={c.id} selected={c.id === values.category_id}>{c.name}</option>)}
+    </select>
+  </label>
+  <label class="label">Comercio
+    <input class="input" name="merchant" maxlength="120" value={values.merchant ?? ''} />
+  </label>
+</div>

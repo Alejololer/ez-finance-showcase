@@ -1,0 +1,280 @@
+---
+import { actions, isInputError } from 'astro:actions';
+import Confirm from '../components/Confirm.astro';
+import Layout from '../layouts/Layout.astro';
+import { formatTiers, type Tier } from '../lib/card';
+import { cardSummaries, shortDate } from '../lib/cards';
+import { formatMoney, today } from '../lib/money';
+
+const created = Astro.getActionResult(actions.createAccount);
+const edited = Astro.getActionResult(actions.updateAccount);
+const adjusted = Astro.getActionResult(actions.setBalance);
+const paid = Astro.getActionResult(actions.createTransfer);
+const billed = Astro.getActionResult(actions.setCardStatement);
+const invited = Astro.getActionResult(actions.inviteMember);
+const accepted = Astro.getActionResult(actions.acceptInvite);
+const left = Astro.getActionResult(actions.leaveShare);
+const errors = isInputError(created?.error) ? created.error.fields : {};
+const failed = [edited, adjusted, paid, billed, invited, accepted, left].find((r) => r?.error)?.error;
+const flash =
+  (created && !created.error && 'cuenta creada') ||
+  (invited && !invited.error && 'invitación enviada') ||
+  (accepted && !accepted.error && 'ahora compartes la cuenta') ||
+  (left && !left.error && 'la cuenta ya no se comparte') ||
+  (billed && !billed.error && 'monto del banco guardado') ||
+  (edited && !edited.error && 'cuenta actualizada') ||
+  (adjusted && !adjusted.error && 'saldo ajustado') ||
+  (paid && !paid.error && 'pago registrado; si llega el correo del banco se reconcilia solo');
+
+const sb = Astro.locals.supabase;
+const [{ data }, shares, pendingIn] = await Promise.all([
+  sb.from('account_balances').select('*').order('id'),
+  sb.from('account_members').select('account_id, owner_id, owner_email, email, user_id, contribution_pct, due_day'),
+  // Pagos que ya esperan en la bandeja (llegó el correo del banco): el botón "registrar pago" los duplicaría.
+  sb.from('transactions').select('account_id').eq('status', 'pending').eq('kind', 'transfer').gt('amount_cents', 0),
+]);
+const paymentPending = (id: number) => (pendingIn.data ?? []).some((t) => t.account_id === id);
+const accounts = data ?? [];
+const me = Astro.locals.userId;
+// Cuenta común: la fila de cada cuenta compartida (como titular o como la otra persona) y las invitaciones recibidas.
+const shareOf = (id: number) => shares.data?.find((s) => s.account_id === id && (s.owner_id === me || s.user_id === me));
+const invites = (shares.data ?? []).filter((s) => !s.user_id && s.owner_id !== me);
+const cards = await cardSummaries(sb, accounts);
+const nameOf = (id: number | null) => accounts.find((a) => a.id === id)?.name ?? '';
+const TYPE: Record<string, string> = { checking: 'Corriente', savings: 'Ahorro', credit: 'Tarjeta de crédito', cash: 'Efectivo' };
+const NUMBERS_HINT = 'Últimos 3 o 4 dígitos de la cuenta y de sus tarjetas, separados por coma o punto';
+const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const defaultName = accounts.find((a) => a.is_default && a.user_id === me)?.name;
+---
+<Layout title="Cuentas" path="cuentas" flash={flash}>
+  {failed && <p class="error">{isInputError(failed) ? Object.values(failed.fields).flat()[0] : failed.message}</p>}
+
+  {invites.map((s) => (
+    <section class="box flex flex-col gap-3">
+      <p class="notice">{s.owner_email} te invita a compartir una cuenta común. Verás esa cuenta y sus movimientos; de ti, solo verá el total de tus ingresos de cada mes, no tus movimientos.</p>
+      <p class="meta">cada mes, hasta el día {s.due_day}, cada persona pone el {s.contribution_pct} % de su ingreso del mes anterior</p>
+      <div class="flex flex-wrap gap-2">
+        <form method="POST" action={actions.acceptInvite} class="flex-1 sm:flex-none">
+          <button class="btn w-full" name="account_id" value={s.account_id} data-pending="aceptando…">aceptar</button>
+        </form>
+        <form method="POST" action={actions.leaveShare} class="flex-1 sm:flex-none">
+          <button class="btn-ghost w-full" name="account_id" value={s.account_id} data-pending="rechazando…">rechazar</button>
+        </form>
+      </div>
+    </section>
+  ))}
+
+  <section class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    {accounts.map((a) => {
+      const card = cards.get(a.id);
+      const s = card?.status;
+      const share = shareOf(a.id);
+      const mine = a.user_id === me;
+      return (
+        <article class="win">
+          <header class="win-bar"><span class="truncate">{a.name} — {TYPE[a.type]}</span></header>
+          <div class="win-body gap-3">
+            <div class="flex flex-col">
+              <span class:list={['money-hero text-5xl', a.balance_cents < 0 && 'text-neg']}>{formatMoney(a.balance_cents, a.currency)}</span>
+              {a.type === 'credit' && a.balance_cents < 0 && <span class="meta">deuda total</span>}
+            </div>
+            <p class="meta">
+              {TYPE[a.type]}{a.last4 && ' · ' + a.last4.split(',').map((n: string) => `··${n}`).join(' ')}{a.is_default && mine && ' · por defecto'}{a.interest_rate && ` · ${a.interest_rate} % anual`}{a.monthly_fee_tiers && ` · desgravamen ${a.monthly_fee_tiers.map((t: Tier) => formatMoney(t.cents, a.currency)).join(' / ')}`}{a.annual_fee_cents && ` · costo anual ${formatMoney(a.annual_fee_cents, a.currency)} en ${MONTHS[a.annual_fee_month - 1]}`}
+            </p>
+            {share && (
+              <p class="meta">
+                {mine ? (share.user_id ? `compartida con ${share.email}` : `invitación enviada a ${share.email}`) : `cuenta común de ${share.owner_email}`}
+                {' · '}cada persona pone el {share.contribution_pct} % de su ingreso hasta el día {share.due_day}
+              </p>
+            )}
+
+            {a.type === 'credit' && !card && <p class="notice">configura el día de corte y de pago en "editar"</p>}
+            {card && s && (
+              <div class="flex flex-col gap-2 border-t border-line pt-4">
+                <p class="meta">consumos desde el {shortDate(card.cycle.lastClose)}: <span class="money text-fg">{formatMoney(s.cycleSpent, a.currency)}</span> · corta el {shortDate(card.cycle.nextClose)}</p>
+                {s.due > 0 ? (
+                  <>
+                    <p class:list={['text-base', s.overdue ? 'text-neg' : 'text-warn']}>
+                      {s.overdue ? 'vencido: ' : ''}paga {formatMoney(s.due, a.currency)} hasta el {shortDate(card.cycle.dueDate)}
+                      {!s.overdue && ` · ${s.daysLeft === 0 ? 'hoy' : `faltan ${s.daysLeft} días`}`}
+                    </p>
+                    {paymentPending(a.id) ? (
+                      <p class="meta">el pago ya está en la <a href="/inbox" class="underline">bandeja</a>: confírmalo ahí</p>
+                    ) : card.payFromId && (
+                      <form method="POST" action={actions.createTransfer}>
+                        <input type="hidden" name="from_id" value={card.payFromId} />
+                        <input type="hidden" name="to_id" value={a.id} />
+                        <input type="hidden" name="amount" value={(s.due / 100).toFixed(2)} />
+                        <input type="hidden" name="date" value={today()} />
+                        <input type="hidden" name="description" value={`Pago de ${a.name}`} />
+                        <Confirm id={`pay-${a.id}`} yes="sí, registrar" pending="registrando…"
+                          question={`¿Registrar el pago de ${formatMoney(s.due, a.currency)} desde ${nameOf(card.payFromId)}? Si luego llega el correo del banco, se reconcilia solo.`}>
+                          registrar pago de {formatMoney(s.due, a.currency)}
+                        </Confirm>
+                      </form>
+                    )}
+                  </>
+                ) : (
+                  <p class="meta">corte del {shortDate(card.cycle.lastClose)} {s.statement > 0 ? 'pagado' : 'sin saldo'} ✓</p>
+                )}
+                {card.bank !== null && card.bank !== card.appStatement && (
+                  <p class="text-sm text-dim">
+                    Según el banco. La app calcula {formatMoney(card.appStatement, a.currency)}; la diferencia suele ser compras que el banco cobra en el próximo corte.
+                  </p>
+                )}
+                <details>
+                  <summary>lo que dice el banco</summary>
+                  <form method="POST" action={actions.setCardStatement} class="mt-3 flex flex-col gap-3">
+                    <input type="hidden" name="id" value={a.id} />
+                    <label class="label">Pago de contado del corte del {shortDate(card.cycle.lastClose)}
+                      <input class="input" name="billed" inputmode="decimal" pattern="\d+([.,]\d{1,2})?" placeholder="13.06"
+                        value={card.bank !== null ? (card.bank / 100).toFixed(2) : ''} />
+                    </label>
+                    <p class="text-sm text-dim">Llega solo con el correo del estado de cuenta (y los cargos que falten pasan a la bandeja). Si aún no llega, escríbelo tal como aparece en la app del banco. Vacío = usar el cálculo de la app.</p>
+                    <div><button class="btn" data-pending="guardando…">guardar</button></div>
+                  </form>
+                </details>
+              </div>
+            )}
+
+            <details>
+              <summary>ajustar saldo</summary>
+              <form method="POST" action={actions.setBalance} class="mt-3 flex flex-col gap-3">
+                <input type="hidden" name="id" value={a.id} />
+                <label class="label">Saldo real hoy
+                  <input class="input" name="balance" inputmode="decimal" required pattern="-?\d+([.,]\d{1,2})?"
+                    value={(a.balance_cents / 100).toFixed(2)} />
+                </label>
+                <p class="text-sm text-dim">
+                  Se registra la diferencia como ajuste; no cuenta como gasto ni ingreso.
+                  {a.type === 'credit' && ' En tarjetas, la deuda va en negativo (ej. -410.55).'}
+                </p>
+                <div><button class="btn" data-pending="ajustando…">ajustar</button></div>
+              </form>
+            </details>
+
+            {share ? (
+              <form method="POST" action={actions.leaveShare}>
+                <input type="hidden" name="account_id" value={a.id} />
+                <Confirm id={`leave-${a.id}`} yes={mine ? 'sí, dejar de compartir' : 'sí, salir'} pending="guardando…"
+                  question={mine
+                    ? `¿Dejar de compartir ${a.name}? ${share.email} ya no la verá; los movimientos se quedan aquí.`
+                    : `¿Salir de ${a.name}? Dejarás de verla; los movimientos se quedan en la cuenta de ${share.owner_email}.`}>
+                  {mine ? (share.user_id ? 'dejar de compartir' : 'cancelar invitación') : 'salir de la cuenta común'}
+                </Confirm>
+              </form>
+            ) : mine && a.type !== 'credit' && (
+              <details>
+                <summary>compartir</summary>
+                <form method="POST" action={actions.inviteMember} class="mt-3 flex flex-col gap-3">
+                  <input type="hidden" name="account_id" value={a.id} />
+                  <label class="label">Correo de la otra persona
+                    <input class="input" name="email" type="email" required placeholder="nombre@correo.com" />
+                  </label>
+                  <label class="label">% del ingreso que pone cada persona
+                    <input class="input" name="contribution_pct" inputmode="decimal" required pattern="\d{1,3}([.,]\d{1,2})?" placeholder="40" />
+                  </label>
+                  <label class="label">Día límite del aporte
+                    <input class="input" name="due_day" type="number" min="1" max="31" required value="5" />
+                  </label>
+                  <p class="text-sm text-dim">
+                    Para una cuenta común real a tu nombre (te llegan sus avisos). La otra persona necesita una cuenta en
+                    ez-finance con ese correo. Verá esta cuenta y sus movimientos; de ti, solo el total de tus ingresos de cada
+                    mes. Cada mes, hasta ese día, cada persona pone ese % de lo que ganó el mes anterior; lo que falte se suma
+                    al mes siguiente. En inicio verás cuánto le toca a cada persona.
+                  </p>
+                  <div><button class="btn" data-pending="invitando…">invitar</button></div>
+                </form>
+              </details>
+            )}
+
+            {mine && <details>
+              <summary>editar</summary>
+              <form method="POST" action={actions.updateAccount} class="mt-3 flex flex-col gap-3">
+                <input type="hidden" name="id" value={a.id} />
+                <label class="label">Nombre<input class="input" name="name" required maxlength="60" value={a.name} /></label>
+                <label class="label">Tipo
+                  <select class="input" name="type">{Object.entries(TYPE).map(([v, l]) => <option value={v} selected={v === a.type}>{l}</option>)}</select>
+                </label>
+                <label class="label">Últimos dígitos
+                  <input class="input" name="last4" inputmode="decimal" placeholder="7105, 458" title={NUMBERS_HINT} value={a.last4?.replaceAll(',', ', ') ?? ''} />
+                  <span class="text-sm normal-case tracking-normal">{NUMBERS_HINT}.</span>
+                </label>
+                {a.type === 'credit' && (
+                  <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label class="label">Día de corte
+                      <input class="input" name="statement_day" type="number" min="1" max="31" value={a.statement_day ?? ''} placeholder="15" />
+                    </label>
+                    <label class="label">Día de pago
+                      <input class="input" name="due_day" type="number" min="1" max="31" value={a.due_day ?? ''} placeholder="30" />
+                    </label>
+                    <p class="text-sm text-dim sm:col-span-2">Si el estado de cuenta trae otra fecha máxima de pago, se usa esa.</p>
+                    <label class="label sm:col-span-2">Pagar desde
+                      <select class="input" name="pay_from_account_id">
+                        <option value="">Cuenta por defecto{defaultName && ` (${defaultName})`}</option>
+                        {accounts.filter((o) => o.id !== a.id && o.type !== 'credit' && o.user_id === me).map((o) => (
+                          <option value={o.id} selected={o.id === a.pay_from_account_id}>{o.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label class="label sm:col-span-2">Desgravamen mensual
+                      <input class="input" name="monthly_fee_tiers" placeholder="35000: 5, 50000: 6.50, 80000: 7"
+                        value={a.monthly_fee_tiers ? formatTiers(a.monthly_fee_tiers) : ''} />
+                      <span class="text-sm normal-case tracking-normal">Opcional. Un monto fijo (5) o tramos "deuda hasta: monto" (35000: 5 = hasta $35,000 de deuda se cobran $5; si la deuda pasa el último tope, se usa el último monto). Después de cada corte, si quedó deuda, aparece en la bandeja para que lo confirmes.</span>
+                    </label>
+                    <label class="label">Costo anual ($)
+                      <input class="input" name="annual_fee_cents" inputmode="decimal" pattern="\d+([.,]\d{1,2})?" placeholder="40.00"
+                        value={a.annual_fee_cents ? (a.annual_fee_cents / 100).toFixed(2) : ''} />
+                    </label>
+                    <label class="label">Mes del cobro
+                      <select class="input" name="annual_fee_month">
+                        <option value="">—</option>
+                        {MONTHS.map((m, i) => <option value={i + 1} selected={i + 1 === a.annual_fee_month}>{m}</option>)}
+                      </select>
+                    </label>
+                    <p class="text-sm text-dim sm:col-span-2">El costo anual aparece en la bandeja después del corte de ese mes, haya deuda o no.</p>
+                  </div>
+                )}
+                {a.type !== 'credit' && (
+                  <label class="label">Interés anual (%)
+                    <input class="input" name="interest_rate" type="number" min="0.01" max="99.99" step="0.01" value={a.interest_rate ?? ''} placeholder="4.75" />
+                    <span class="text-sm normal-case tracking-normal">Opcional. Se acredita cada día sobre el saldo (como el Ahorro Flexible) y aparece como ingreso "Intereses".</span>
+                  </label>
+                )}
+                <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="is_default" checked={a.is_default} class="size-4 accent-white" /> Cuenta por defecto</label>
+                <div><button class="btn" data-pending="guardando…">guardar</button></div>
+              </form>
+            </details>}
+          </div>
+        </article>
+      );
+    })}
+  </section>
+
+  <details class="win" open={!!created?.error}>
+    <summary class="win-bar">nueva cuenta</summary>
+    <form method="POST" action={actions.createAccount} class="win-body grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <label class="label">Nombre
+        <input class="input" name="name" required maxlength="60" placeholder="Pacificard" />
+        {errors.name && <span class="error">{errors.name[0]}</span>}
+      </label>
+      <label class="label">Tipo
+        <select class="input" name="type">{Object.entries(TYPE).map(([v, l]) => <option value={v}>{l}</option>)}</select>
+      </label>
+      <label class="label">Moneda
+        <input class="input uppercase" name="currency" value="USD" required pattern="[A-Za-z]{3}" maxlength="3" />
+        {errors.currency && <span class="error">{errors.currency[0]}</span>}
+      </label>
+      <label class="label">Últimos dígitos
+        <input class="input" name="last4" inputmode="decimal" placeholder="7105, 458" title={NUMBERS_HINT} />
+        {errors.last4 && <span class="error">{errors.last4[0]}</span>}
+      </label>
+      <p class="text-sm text-dim sm:col-span-2">Tarjetas de crédito: después de crearla, configura el corte, el pago y desde qué cuenta se paga en "editar".</p>
+      <label class="flex items-center gap-2 text-sm sm:col-span-2">
+        <input type="checkbox" name="is_default" class="size-4 accent-white" /> Usar por defecto cuando un aviso no indique la cuenta
+      </label>
+      {created?.error && !isInputError(created.error) && <p class="error sm:col-span-2">{created.error.message}</p>}
+      <div><button class="btn" data-pending="creando…">crear cuenta</button></div>
+    </form>
+  </details>
+</Layout>

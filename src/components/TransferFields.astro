@@ -1,0 +1,31 @@
+---
+// Campos de una transferencia entre cuentas propias.
+import { today } from '../lib/money';
+
+interface Props {
+  accounts: { id: number; name: string }[];
+  values?: { from_id?: number; to_id?: number; amount_cents?: number; date?: string; description?: string | null };
+  errors?: Record<string, string[] | undefined>;
+}
+const { accounts, values = {}, errors = {} } = Astro.props;
+const from = values.from_id ?? accounts[0]?.id;
+const to = values.to_id ?? accounts.find((a) => a.id !== from)?.id;
+const amount = values.amount_cents ? (Math.abs(values.amount_cents) / 100).toFixed(2) : '';
+---
+<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+  <label class="label">Desde
+    <select class="input" name="from_id">{accounts.map((a) => <option value={a.id} selected={a.id === from}>{a.name}</option>)}</select>
+  </label>
+  <label class="label">Hacia
+    <select class="input" name="to_id">{accounts.map((a) => <option value={a.id} selected={a.id === to}>{a.name}</option>)}</select>
+    {errors.to_id && <span class="error">{errors.to_id[0]}</span>}
+  </label>
+  <label class="label">Monto
+    <input class="input" name="amount" inputmode="decimal" required pattern="\d+([.,]\d{1,2})?" placeholder="0.00" value={amount} />
+    {errors.amount && <span class="error">{errors.amount[0]}</span>}
+  </label>
+  <label class="label">Fecha<input class="input" type="date" name="date" required value={values.date ?? today()} /></label>
+  <label class="label sm:col-span-2">Descripción
+    <input class="input" name="description" maxlength="500" placeholder="Ej. pago de tarjeta" value={values.description ?? ''} />
+  </label>
+</div>

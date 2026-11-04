@@ -1,0 +1,21 @@
+---
+// Confirmación de una acción destructiva sin confirm() nativo: el disparador abre un popover con la pregunta.
+// Va dentro del <form>; "sí" es su botón de envío (formnovalidate: los campos de "editar" no deben frenarlo).
+interface Props {
+  id: string; // único en la página
+  question: string;
+  yes: string; // texto del botón que confirma
+  pending: string; // data-pending del botón que confirma
+  formaction?: string;
+  class?: string; // clase del disparador
+}
+const { id, question, yes, pending, formaction, class: cls = 'btn-ghost' } = Astro.props;
+---
+<button type="button" class={cls} popovertarget={id}><slot /></button>
+<div id={id} popover class="confirm box">
+  <p class="font-serif text-xl italic">{question}</p>
+  <div class="mt-5 flex flex-wrap gap-2">
+    <button class="btn flex-1" formaction={formaction} formnovalidate data-pending={pending}>{yes}</button>
+    <button type="button" class="btn-ghost flex-1" popovertarget={id} popovertargetaction="hide">cancelar</button>
+  </div>
+</div>

@@ -1,0 +1,205 @@
+---
+import { actions, isInputError } from 'astro:actions';
+import Confirm from '../components/Confirm.astro';
+import TransferFields from '../components/TransferFields.astro';
+import TxFields from '../components/TxFields.astro';
+import Layout from '../layouts/Layout.astro';
+import { addDays } from '../lib/interest';
+import { formatMoney, held, today } from '../lib/money';
+
+const sb = Astro.locals.supabase;
+const FLASH = {
+  confirmTransaction: 'movimiento confirmado',
+  confirmTransfer: 'transferencia confirmada',
+  discardTransaction: 'descartado',
+  dismissEvent: 'aviso descartado',
+  createTransaction: 'movimiento registrado',
+  createTransfer: 'transferencia registrada',
+} as const;
+const results = (Object.keys(FLASH) as (keyof typeof FLASH)[]).map((k) => [k, Astro.getActionResult(actions[k])] as const);
+const failed = results.find(([, r]) => r?.error)?.[1];
+const done = results.find(([, r]) => r && !r.error)?.[0];
+const fieldErrors = isInputError(failed?.error) ? failed.error.fields : {};
+// Cada form lleva ?item=<ancla> para que el error se muestre solo en su ventana, no en todas.
+const errItem = failed?.error ? Astro.url.searchParams.get('item') : null;
+
+const [pending, review, accounts, categories] = await Promise.all([
+  sb.from('transactions')
+    .select('id, user_id, kind, amount_cents, date, account_id, category_id, merchant, description, source, transfer_id, created_at, ingest_event_id, ingest:ingest_events(raw), dup:duplicate_of(merchant, description, date, amount_cents, source)')
+    .eq('status', 'pending').order('date', { ascending: false }).order('id'),
+  sb.from('ingest_events').select('id, source, raw, error, received_at').eq('status', 'review').order('id', { ascending: false }),
+  sb.from('accounts').select('id, name, user_id').order('id'),
+  sb.from('categories').select('id, name, user_id').order('name'),
+]);
+// Un ingreso del celular con el mismo monto (±1 día) que una transferencia que entró a una cuenta tuya es casi seguro
+// su push: el aporte a tu cuenta común registrado con el botón, o una transferencia propia anotada a mano. El parser
+// no lo ve (el botón no lo dispara), así que se marca aquí como posible duplicado.
+const pushIncome = (pending.data ?? []).filter((r) => r.kind === 'income' && !r.dup && (r.source === 'android' || r.source === 'ios'));
+const dates = pushIncome.map((r) => r.date).sort();
+const inLegs = pushIncome.length
+  ? (await sb.from('transactions').select('user_id, amount_cents, date, description, source').eq('kind', 'transfer')
+      .in('amount_cents', [...new Set(pushIncome.map((r) => r.amount_cents))])
+      .gte('date', addDays(dates[0], -1)).lte('date', addDays(dates.at(-1)!, 1))).data ?? []
+  : [];
+const transferLike = (r: { user_id: string; amount_cents: number; date: string }) =>
+  inLegs.find((l) => l.user_id === r.user_id && l.amount_cents === r.amount_cents && Math.abs(Date.parse(l.date) - Date.parse(r.date)) <= 86_400_000);
+// Las propias primero: los selectores arrancan en una cuenta tuya, no en la cuenta común de otra persona.
+accounts.data?.sort((a, b) => Number(b.user_id === Astro.locals.userId) - Number(a.user_id === Astro.locals.userId));
+const accs = accounts.data ?? [];
+const cats = categories.data ?? [];
+// Un movimiento de la cuenta común de otra titular lleva categorías de ella; los nuevos, las propias.
+const catsOf = (userId = Astro.locals.userId) => cats.filter((c) => c.user_id === userId);
+const SOURCE: Record<string, string> = { email: 'correo', android: 'android', ios: 'iphone', manual: 'manual', auto: 'automático' };
+type Row = NonNullable<typeof pending.data>[number];
+type Dup = { merchant: string | null; description: string | null; date: string; amount_cents: number; source: string } | null;
+
+// Las dos patas de una transferencia se muestran (y confirman) como una sola ventana.
+const items: ({ type: 'tx'; row: Row } | { type: 'transfer'; out: Row; in: Row })[] = [];
+const legs = new Map<string, Row>();
+// Lo que llega del celular espera unos minutos al correo del mismo movimiento (ver held en lib/money).
+const waiting = new Set<number>();
+for (const row of pending.data ?? []) {
+  if (held(row.source, row.created_at)) { waiting.add(row.ingest_event_id ?? row.id); continue; }
+  if (!row.transfer_id) { items.push({ type: 'tx', row }); continue; }
+  const other = legs.get(row.transfer_id);
+  if (!other) { legs.set(row.transfer_id, row); continue; }
+  const [out, inn] = row.amount_cents < 0 ? [row, other] : [other, row];
+  items.push({ type: 'transfer', out, in: inn });
+}
+const rawOf = (r: Row) => (r.ingest as unknown as { raw: string } | null)?.raw;
+const accName = (id: number) => accs.find((a) => a.id === id)?.name ?? '¿cuenta?';
+const catName = (id: number | null) => cats.find((c) => c.id === id)?.name.toLowerCase() ?? 'sin categoría';
+const dayLabel = (d: string) => new Date(d + 'T12:00:00').toLocaleDateString('es', { day: 'numeric', month: 'short' });
+const reviews = (review.data ?? []).filter((e) => !held(e.source, e.received_at));
+const waitingCount = waiting.size + (review.data?.length ?? 0) - reviews.length;
+const total = items.length + reviews.length;
+
+const to = (action: object, key: string) => `${action}&item=${key}`;
+const keys = [...items.map((it) => `i-${it.type === 'tx' ? it.row.id : it.out.id}`), ...reviews.map((e) => `e-${e.id}`)];
+const errorsOf = (key: string) => (key === errItem ? fieldErrors : {});
+const hasErrors = (key: string) => key === errItem && Object.keys(fieldErrors).length > 0;
+const messageOf = (key: string) => (key === errItem && failed?.error && !isInputError(failed.error) ? failed.error.message : null);
+---
+<Layout title="Bandeja" em={total === 0 ? 'al día.' : undefined} path={`bandeja · ${total} ${total === 1 ? 'pendiente' : 'pendientes'}`} flash={done && FLASH[done]}>
+  {failed?.error && !isInputError(failed.error) && !keys.includes(errItem ?? '') && <p class="error">{failed.error.message}</p>}
+  {total === 0 && (
+    <div class="box">
+      <p class="font-serif text-2xl italic">nada por confirmar</p>
+      <p class="meta mt-2">Los movimientos que lleguen por correo, Android o iPhone aparecerán aquí para que los confirmes.</p>
+    </div>
+  )}
+  {waitingCount > 0 && (
+    <p class="meta">
+      {waitingCount === 1 ? '1 aviso del celular espera' : `${waitingCount} avisos del celular esperan`} el correo del banco
+      del mismo movimiento; si no llega, {waitingCount === 1 ? 'aparecerá' : 'aparecerán'} aquí en unos minutos.
+    </p>
+  )}
+
+  {items.map((item) => {
+    const head = item.type === 'tx' ? item.row : item.out;
+    const key = `i-${head.id}`;
+    const raw = rawOf(head);
+    const like = item.type === 'tx' && pushIncome.includes(head) ? transferLike(head) : undefined;
+    const dup = (head.dup as unknown as Dup) ?? (like ? { ...like, merchant: null, description: like.description || 'una transferencia' } : null);
+    const message = messageOf(key);
+    return (
+      <section class="win">
+        <header class="win-bar"><span class="truncate">{SOURCE[head.source]}{item.type === 'transfer' && ' · transferencia'} · {dayLabel(head.date)}</span></header>
+        <div class="win-body">
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="item truncate">{item.type === 'transfer' ? (item.in.user_id !== item.out.user_id ? 'aporte a la cuenta común' : 'entre tus cuentas') : head.merchant || 'sin comercio'}</span>
+            <span class:list={['money shrink-0 text-xl', item.type === 'tx' && (head.amount_cents < 0 ? 'text-neg' : 'text-pos')]}>
+              {item.type === 'tx' && (head.amount_cents < 0 ? '−' : '+')}{formatMoney(Math.abs(head.amount_cents))}
+            </span>
+          </div>
+          {dup && (
+            <p class="notice">
+              ¿duplicado? ya existe {dup.merchant || dup.description || 'un movimiento'} del {dup.date} ({SOURCE[dup.source]}, {formatMoney(Math.abs(dup.amount_cents))})
+            </p>
+          )}
+          {raw && <details><summary>texto original</summary><pre class="mt-2 font-sans text-sm leading-snug whitespace-pre-wrap break-words text-dim">{raw}</pre></details>}
+          {item.type === 'tx' ? (
+            <form method="POST" action={to(actions.confirmTransaction, key)} class="flex flex-col gap-4">
+              <input type="hidden" name="id" value={item.row.id} />
+              <p class="meta">{accName(item.row.account_id)} · {catName(item.row.category_id)}</p>
+              <details open={hasErrors(key)}>
+                <summary>editar</summary>
+                <div class="mt-3"><TxFields accounts={accs} categories={catsOf(item.row.user_id)} values={item.row} errors={errorsOf(key)} /></div>
+              </details>
+              {message && <p class="error">{message}</p>}
+              <div class="flex flex-wrap gap-2">
+                <button class="btn flex-1 sm:flex-none" data-pending="confirmando…">confirmar</button>
+                <button class="btn-ghost flex-1 sm:flex-none" name="iva" value="1" data-pending="confirmando…"
+                  title="Agrega otro gasto con el 15 % de IVA, que el banco cobra aparte">confirmar con IVA</button>
+                <Confirm id={`d-${key}`} question="¿Descartar este movimiento?" yes="sí, descartar" pending="descartando…"
+                  formaction={to(actions.discardTransaction, key)}>descartar</Confirm>
+              </div>
+            </form>
+          ) : (
+            <form method="POST" action={to(actions.confirmTransfer, key)} class="flex flex-col gap-4">
+              <input type="hidden" name="transfer_id" value={item.out.transfer_id} />
+              <p class="meta">{accName(item.out.account_id)} → {accName(item.in.account_id)}</p>
+              <details open={hasErrors(key)}>
+                <summary>editar</summary>
+                <div class="mt-3">
+                  <TransferFields accounts={accs} errors={errorsOf(key)}
+                    values={{ from_id: item.out.account_id, to_id: item.in.account_id, amount_cents: item.in.amount_cents, date: item.out.date, description: item.out.description }} />
+                </div>
+              </details>
+              {message && <p class="error">{message}</p>}
+              <div class="flex flex-wrap gap-2">
+                <button class="btn flex-1 sm:flex-none" data-pending="confirmando…">confirmar</button>
+                <Confirm id={`d-${key}`} question="¿Descartar esta transferencia?" yes="sí, descartar" pending="descartando…"
+                  formaction={to(actions.discardTransaction, key)}>descartar</Confirm>
+              </div>
+            </form>
+          )}
+        </div>
+      </section>
+    );
+  })}
+
+  {reviews.map((e) => {
+    const key = `e-${e.id}`;
+    const message = messageOf(key);
+    // Estados de cuenta: el correo + PDF es largo, va plegado. El saldo que no cuadra al corte (reconcile.ts:
+    // "Estado de cuenta de <cuenta> al …") no se registra como movimiento: solo "descartar".
+    const long = e.error?.startsWith('Estado de cuenta');
+    const statement = e.error?.startsWith('Estado de cuenta de ');
+    const raw = <pre class:list={['font-sans text-sm leading-snug whitespace-pre-wrap break-words text-dim', long && 'mt-2']}>{e.raw}</pre>;
+    return (
+      <section class="win">
+        <header class="win-bar"><span>{SOURCE[e.source]} · revisar · {dayLabel(today(new Date(e.received_at)))}</span></header>
+        <div class="win-body">
+          <p class="notice">{e.error}</p>
+          {long ? <details><summary>texto original</summary>{raw}</details> : raw}
+          {!statement && <details open={hasErrors(key)}>
+            <summary>registrar como gasto o ingreso</summary>
+            <form method="POST" action={to(actions.createTransaction, key)} class="mt-3 flex flex-col gap-4">
+              <input type="hidden" name="ingest_event_id" value={e.id} />
+              <TxFields accounts={accs} categories={catsOf()} values={{ date: today(new Date(e.received_at)) }} errors={errorsOf(key)} />
+              <div class="flex flex-wrap gap-2">
+                <button class="btn" data-pending="registrando…">registrar</button>
+                <button class="btn-ghost" name="iva" value="1" data-pending="registrando…"
+                  title="Agrega otro gasto con el 15 % de IVA, que el banco cobra aparte">registrar con IVA</button>
+              </div>
+            </form>
+          </details>}
+          {!statement && accs.length > 1 && (
+            <details>
+              <summary>registrar como transferencia</summary>
+              <form method="POST" action={to(actions.createTransfer, key)} class="mt-3 flex flex-col gap-4">
+                <input type="hidden" name="ingest_event_id" value={e.id} />
+                <TransferFields accounts={accs} values={{ date: today(new Date(e.received_at)) }} errors={errorsOf(key)} />
+                <div><button class="btn" data-pending="registrando…">registrar transferencia</button></div>
+              </form>
+            </details>
+          )}
+          {message && <p class="error">{message}</p>}
+          <form method="POST" action={to(actions.dismissEvent, key)}>
+            <button class="btn-ghost" name="id" value={e.id} data-pending="descartando…">descartar aviso</button>
+          </form>
+        </div>
+      </section>
+    );
+  })}</Layout>

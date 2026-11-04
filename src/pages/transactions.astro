@@ -1,0 +1,174 @@
+---
+import { actions, isInputError } from 'astro:actions';
+import Confirm from '../components/Confirm.astro';
+import TransferFields from '../components/TransferFields.astro';
+import TxFields from '../components/TxFields.astro';
+import Layout from '../layouts/Layout.astro';
+import { formatMoney } from '../lib/money';
+
+const sb = Astro.locals.supabase;
+const created = Astro.getActionResult(actions.createTransaction);
+const transfer = Astro.getActionResult(actions.createTransfer);
+const txErrors = isInputError(created?.error) ? created.error.fields : {};
+const trErrors = isInputError(transfer?.error) ? transfer.error.fields : {};
+const recat = Astro.getActionResult(actions.setCategory);
+const removed = Astro.getActionResult(actions.deleteTransaction);
+const flash = (created && !created.error && 'movimiento registrado') || (transfer && !transfer.error && 'transferencia registrada')
+  || (recat && !recat.error && 'categoría actualizada') || (removed && !removed.error && 'movimiento eliminado');
+
+// Filtro por GET: tipo (expense|income), cat (nombre; '-' = sin categoría) y desde (llega del desglose de inicio).
+const qs = Astro.url.searchParams;
+const tipo = ['expense', 'income'].includes(qs.get('tipo') ?? '') ? qs.get('tipo')! : '';
+const cat = qs.get('cat') ?? '';
+const desde = /^\d{4}-\d{2}-\d{2}$/.test(qs.get('desde') ?? '') ? qs.get('desde')! : '';
+const filtered = !!(tipo || cat || desde);
+// Las acciones apuntan a ?_action=…: sin esto, guardar con un filtro activo vuelve a la lista completa.
+const keep = new URLSearchParams(Object.entries({ tipo, cat, desde }).filter(([, v]) => v)).toString();
+const to = (action: string) => (keep ? `${action}&${keep}` : action);
+
+let q = sb.from('transactions')
+  .select('id, kind, amount_cents, date, merchant, description, status, account:accounts(name, currency), category:categories(name)')
+  .order('date', { ascending: false }).order('id', { ascending: false }).limit(100);
+if (tipo) q = q.eq('kind', tipo);
+if (desde) q = q.gte('date', desde);
+// Transferencias y ajustes nunca llevan categoría: "sin categoría" es solo de gastos e ingresos.
+if (cat === '-') q = q.is('category_id', null).in('kind', ['expense', 'income']);
+else if (cat) {
+  // Por nombre y sin filtrar por user_id: en la cuenta común la fila lleva la categoría de la titular, del mismo nombre.
+  const { data } = await sb.from('categories').select('id').eq('name', cat);
+  q = q.in('category_id', data?.length ? data.map((c) => c.id) : [-1]); // ponytail: -1 = nombre inexistente → lista vacía
+}
+
+const [list, accounts, categories] = await Promise.all([
+  q,
+  sb.from('accounts').select('id, name, user_id').order('id'),
+  sb.from('categories').select('id, name').eq('user_id', Astro.locals.userId!).order('name'), // las de la cuenta común se ven, pero se elige entre las propias
+]);
+// Las propias primero: los selectores arrancan en una cuenta tuya, no en la cuenta común de otra persona.
+accounts.data?.sort((a, b) => Number(b.user_id === Astro.locals.userId) - Number(a.user_id === Astro.locals.userId));
+type Rel = { name: string; currency?: string } | null;
+const n = list.data?.length ?? 0;
+
+// Agrupado por día, como un log.
+const days = new Map<string, NonNullable<typeof list.data>>();
+for (const t of list.data ?? []) days.set(t.date, [...(days.get(t.date) ?? []), t]);
+const dayLabel = (d: string) =>
+  new Date(d + 'T12:00:00').toLocaleDateString('es', { weekday: 'short', day: 'numeric', month: 'short' });
+const KIND: Record<string, string> = { transfer: 'transferencia', adjustment: 'ajuste' };
+---
+<Layout title="Movimientos" path="movimientos" flash={flash}>
+  <div class="flex flex-col gap-4">
+    <details class="win" open={!!created?.error}>
+      <summary class="win-bar">nuevo movimiento</summary>
+      <form method="POST" action={to(actions.createTransaction)} class="win-body">
+        <TxFields accounts={accounts.data ?? []} categories={categories.data ?? []} errors={txErrors} />
+        {created?.error && !isInputError(created.error) && <p class="error">{created.error.message}</p>}
+        <div class="flex flex-wrap gap-2">
+          <button class="btn" data-pending="registrando…">registrar</button>
+          <button class="btn-ghost" name="iva" value="1" data-pending="registrando…"
+            title="Agrega otro gasto con el 15 % de IVA, que el banco cobra aparte">registrar con IVA</button>
+        </div>
+      </form>
+    </details>
+
+    {(accounts.data?.length ?? 0) > 1 && (
+      <details class="win" open={!!transfer?.error}>
+        <summary class="win-bar">transferir entre cuentas</summary>
+        <form method="POST" action={to(actions.createTransfer)} class="win-body">
+          <TransferFields accounts={accounts.data!} errors={trErrors} />
+          {transfer?.error && !isInputError(transfer.error) && <p class="error">{transfer.error.message}</p>}
+          <div><button class="btn" data-pending="transfiriendo…">transferir</button></div>
+        </form>
+      </details>
+    )}
+  </div>
+
+  <form method="GET" class="grid grid-cols-2 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+    <label class="label">Tipo
+      <select class="input" name="tipo">
+        <option value="">Todos</option>
+        <option value="expense" selected={tipo === 'expense'}>Gastos</option>
+        <option value="income" selected={tipo === 'income'}>Ingresos</option>
+      </select>
+    </label>
+    <label class="label">Categoría
+      <select class="input" name="cat">
+        <option value="">Todas</option>
+        <option value="-" selected={cat === '-'}>Sin categoría</option>
+        {categories.data?.map((c) => <option value={c.name} selected={c.name === cat}>{c.name}</option>)}
+      </select>
+    </label>
+    {desde && <input type="hidden" name="desde" value={desde} />}
+    <button class="btn-ghost col-span-2 sm:col-span-1">filtrar</button>
+    {filtered && (
+      <p class="meta col-span-2 sm:col-span-3">
+        {desde && `desde el ${dayLabel(desde)} · `}{n === 100 ? 'los últimos 100' : `${n} ${n === 1 ? 'movimiento' : 'movimientos'}`} ·{' '}
+        <a href="/transactions" class="underline">quitar filtro</a>
+      </p>
+    )}
+  </form>
+
+  {recat?.error && <p class="error">{recat.error.message}</p>}
+  {removed?.error && <p class="error">{removed.error.message}</p>}
+  {filtered && !list.data?.length && (
+    <div class="box">
+      <p class="font-serif text-2xl italic">nada con este filtro</p>
+      <p class="meta mt-2">Prueba con otro tipo o categoría, o <a href="/transactions" class="underline">quita el filtro</a>.</p>
+    </div>
+  )}
+  {!filtered && !list.data?.length && (
+    <div class="box">
+      <p class="font-serif text-2xl italic">sin movimientos aún</p>
+      <p class="meta mt-2">Lo que confirmes en la bandeja y lo que registres aquí aparecerá agrupado por día.</p>
+    </div>
+  )}
+  {/* Días seguidos (sin el gap de main): el espacio entre días va dentro de la superficie de .head. */}
+  <div class="flex flex-col">
+  {[...days].map(([date, txs], i) => (
+    <section class="flex flex-col">
+      <h2 class:list={['prompt head', i > 0 && 'pt-8']}>{dayLabel(date)}</h2>
+      {txs.map((t) => {
+        const account = t.account as unknown as Rel;
+        const category = t.category as unknown as Rel;
+        const body = (
+          <>
+            <div class="flex min-w-0 flex-col">
+              <span class="item truncate">{t.merchant || t.description || 'sin descripción'}</span>
+              <span class="meta truncate">
+                {account?.name} · {KIND[t.kind] ?? category?.name ?? 'sin categoría'}{t.status === 'pending' && ' · pendiente'}
+              </span>
+            </div>
+            <span class:list={['money shrink-0 text-xl', KIND[t.kind] ? 'text-fg' : t.amount_cents < 0 ? 'text-neg' : 'text-pos', t.status === 'pending' && 'opacity-75']}>
+              {t.amount_cents < 0 ? '−' : '+'}{formatMoney(Math.abs(t.amount_cents), account?.currency)}
+            </span>
+          </>
+        );
+        // Lo pendiente se edita (o descarta) en la bandeja; transferencias y ajustes no llevan categoría, solo se eliminan.
+        if (t.status === 'pending') return <div class="row items-center justify-between gap-3">{body}</div>;
+        return (
+          <details class="row block">
+            {/* Anula el estilo global de summary (serif cursiva con "+ "): aquí es la fila entera. */}
+            <summary class="flex items-center justify-between gap-3 font-sans text-base not-italic text-fg before:content-none">{body}</summary>
+            <form method="POST" action={to(actions.setCategory)} class="mt-3 flex flex-wrap gap-2">
+              <input type="hidden" name="id" value={t.id} />
+              {!KIND[t.kind] && (
+                <>
+                  {/* Por nombre: en la cuenta común la fila lleva la categoría de la titular, no la tuya. */}
+                  <select class="input flex-1" name="category_id" aria-label="categoría">
+                    <option value="">Sin categoría</option>
+                    {categories.data?.map((c) => <option value={c.id} selected={c.name === category?.name}>{c.name}</option>)}
+                  </select>
+                  <button class="btn flex-1 sm:flex-none" data-pending="guardando…">guardar</button>
+                </>
+              )}
+              <Confirm id={`del-${t.id}`} class="btn-ghost flex-1 sm:flex-none" yes="sí, eliminar" pending="eliminando…"
+                question={t.kind === 'transfer' ? '¿Eliminar esta transferencia? Se borra de ambas cuentas.' : '¿Eliminar este movimiento?'}
+                formaction={to(actions.deleteTransaction)}>eliminar</Confirm>
+            </form>
+          </details>
+        );
+      })}
+    </section>
+  ))}
+  </div>
+</Layout>

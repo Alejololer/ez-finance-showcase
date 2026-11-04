@@ -1,0 +1,38 @@
+name: parse-pending
+
+on:
+  # /api/ingest lo dispara al llegar cada aviso (GITHUB_DISPATCH_TOKEN en Vercel).
+  # Copia pública: sin cron (aquí no hay secretos). El original corre además cada hora como red de seguridad.
+  workflow_dispatch:
+
+concurrency:
+  group: parse-pending
+  cancel-in-progress: false
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: node scripts/parse-pending.ts
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          # Notificaciones push de lo nuevo en la bandeja (mismas claves que PUBLIC_VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY
+          # de Vercel). Sin ellas el parser no avisa.
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+      # Intereses y ajustes por estado de cuenta. always(): un límite de Claude en el paso anterior no los frena.
+      - run: node scripts/reconcile.ts
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}

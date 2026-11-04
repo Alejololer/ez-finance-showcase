@@ -1,0 +1,180 @@
+@import "tailwindcss";
+
+/* Identidad "statue hall" (prototipo de alejololer.is-a.dev): negro profundo, Fraunces liviana con cursiva,
+   Inter Tight, líneas finas y una escultura 1-bit tramada de fondo (Sculpture.astro).
+   Color solo en montos y avisos, apagado. El modo "vapor" (escribe vapor) tiñe la trama y los acentos. */
+@theme {
+  --color-bg: #050505;
+  --color-fg: #eee;
+  --color-dim: #9a9a9a;
+  --color-line: #ffffff1f;
+  --color-hi: #fff;
+  --color-neg: #e8a0a0;
+  --color-pos: #9fd8cf;
+  --color-warn: #e3d29a;
+  --font-sans: "Inter Tight", system-ui, sans-serif;
+  --font-serif: "Fraunces", Georgia, serif;
+}
+
+html.vapor {
+  --color-line: #b967ff59;
+  --color-hi: #ff9de2;
+}
+
+:root { color-scheme: dark; }
+
+/* cover: pantalla externa de los plegables tipo concha (Z Flip 7: ~360×400 CSS px), casi cuadrada y baja.
+   Titular más chico, sin eyebrow ni marquee. Una pantalla de celular vertical u
+   horizontal no entra (aspecto fuera de 3/4–4/3) y el teclado de Chrome no achica el viewport de diseño. */
+@custom-variant cover (@media (max-height: 520px) and (min-aspect-ratio: 3/4) and (max-aspect-ratio: 4/3));
+
+@layer base {
+  /* scrollbar-gutter: páginas cortas y largas reservan el mismo ancho; si no, el nav salta al navegar. */
+  html { @apply overflow-x-clip bg-bg; scrollbar-gutter: stable; }
+  body { @apply min-h-screen font-sans leading-relaxed font-light text-fg antialiased; }
+  ::selection { @apply bg-hi text-bg; }
+  :focus-visible { @apply outline outline-1 outline-offset-4 outline-hi; }
+}
+
+@layer components {
+  .display { @apply font-serif text-[clamp(3.5rem,12vw,8.5rem)] leading-[0.85] font-light tracking-[-0.04em] cover:text-[2.75rem]; }
+  .display i { @apply italic; }
+  html.vapor .display i { @apply text-pos; }
+
+  /* Eyebrow: "II — BANDEJA · 3 PENDIENTES". */
+  .prompt { @apply text-[13px] font-light tracking-[0.3em] text-dim uppercase; }
+  /* Encabezado de un grupo de filas (fecha, "cuentas"): misma superficie que .row, así en celular el texto no
+     queda sobre la trama y el grupo es un bloque continuo (sin franjas de escultura entre encabezado y filas). */
+  .head { @apply -mx-6 bg-bg/90 px-6 pb-4 backdrop-blur-md sm:mx-0 sm:px-0; }
+
+  /* Las superficies llevan fondo con blur para que el texto no quede sobre los píxeles blancos de la trama. */
+  .box { @apply border border-line bg-bg/90 p-5 backdrop-blur-md; }
+
+  /* Sección: <section class="win"><header class="win-bar"><span>Pichincha — corriente</span></header><div class="win-body">… */
+  /* En celular .win y .row llegan al borde de la pantalla (el texto sigue en el gutter): si no, su fondo negro
+     recorta la escultura en un rectángulo y el texto queda a ras de ese borde. */
+  .win { @apply -mx-6 border-t border-line bg-bg/90 px-6 backdrop-blur-md sm:mx-0 sm:px-0; }
+  .win-bar { @apply flex items-baseline gap-3 py-4 text-[13px] tracking-[0.3em] text-dim uppercase; }
+  .win-body { @apply flex flex-col gap-5 pb-8; }
+  summary.win-bar { @apply transition-colors hover:text-fg; }
+
+  .label { @apply flex flex-col gap-1.5 text-xs font-medium tracking-[0.25em] text-dim uppercase; }
+  .input {
+    @apply w-full rounded-none border-0 border-b border-line bg-transparent px-0 py-2 font-sans text-base font-light tracking-normal text-fg normal-case transition-colors;
+    @apply focus:border-hi focus:outline-none;
+  }
+  .input option { @apply bg-bg; }
+  .btn {
+    @apply inline-flex min-h-11 items-center justify-center rounded-full border border-hi bg-hi px-6 whitespace-nowrap text-[13px] font-medium tracking-[0.2em] text-bg uppercase transition-colors;
+    @apply hover:bg-transparent hover:text-hi disabled:cursor-wait disabled:opacity-60;
+  }
+  .btn-ghost {
+    @apply inline-flex min-h-11 items-center justify-center rounded-full border border-line px-6 whitespace-nowrap text-[13px] font-medium tracking-[0.2em] text-fg uppercase transition-colors;
+    @apply hover:border-hi hover:text-hi disabled:cursor-wait disabled:opacity-60;
+  }
+  /* "con IVA" solo aplica a gastos: se oculta si el form está en ingreso. */
+  form:has(select[name='kind'] option[value='income']:checked) button[name='iva'] { display: none; }
+  /* Un estilo por rol: .item = nombre en fila o ventana; montos de lista = .money text-xl;
+     .money-hero = la cifra protagonista de un bloque. */
+  .item { @apply font-serif text-2xl leading-tight; }
+  .notice { @apply border-l-2 border-warn pl-3 text-sm text-warn; }
+  .error { @apply text-sm text-neg; }
+  .flash { @apply font-serif text-xl italic text-pos; }
+  /* Confirmación de la última acción: fija abajo para verse aunque la página quede a media altura (bandeja).
+     Aparece de inmediato y se desvanece sola. */
+  .toast {
+    @apply pointer-events-none fixed bottom-6 left-1/2 z-40 w-max max-w-[calc(100vw-3rem)] -translate-x-1/2 border border-line bg-bg px-5 py-2 text-center;
+    animation: out 0.6s 4s forwards;
+  }
+  /* Confirm.astro: popover centrado en vez del confirm() del navegador. */
+  .confirm { @apply m-auto max-h-[calc(100dvh-2rem)] w-[min(24rem,calc(100vw-3rem))] overflow-y-auto text-fg; }
+  .confirm::backdrop { @apply bg-bg/70; }
+  .meta { @apply text-sm text-dim; }
+  .money { @apply font-sans font-medium tracking-tight tabular-nums; }
+  .money-hero { @apply font-serif leading-[0.9] font-light tracking-[-0.04em]; }
+
+  summary { @apply cursor-pointer list-none; }
+  summary::-webkit-details-marker { display: none; }
+  summary:not(.win-bar) { @apply font-serif text-lg text-dim italic transition-colors hover:text-fg; }
+  details > summary::before { content: "+ "; @apply font-serif; }
+  details[open] > summary::before { content: "− "; }
+
+  /* Fila de lista (prototipo: .site). El hover desplazado solo en enlaces. */
+  .row { @apply -mx-6 flex items-baseline gap-4 border-t border-line bg-bg/90 px-6 py-4 sm:mx-0 sm:px-0 backdrop-blur-md transition-[padding,color] duration-500; }
+  a.row:hover { @apply text-hi sm:pl-3; }
+  .row .n { @apply w-[2.5ch] shrink-0 text-xs text-dim tabular-nums; }
+
+  /* Relleno tramado 1-bit, eco de la escultura. */
+  .dither { background: repeating-conic-gradient(var(--color-hi) 0 25%, #0000 0 50%) 0 0 / 2px 2px; }
+  .bar { @apply block h-1 bg-line; }
+
+  /* Ocupa el ancho completo de la ventana aunque main tenga gutter (html recorta el desborde de la barra de scroll). */
+  .bleed { @apply -mx-6 sm:mr-0 sm:-ml-[5vw] sm:w-screen; }
+
+  .marquee { @apply cover:hidden overflow-hidden border-y border-line bg-bg/60 py-3.5 text-[13px] tracking-[0.6em] whitespace-nowrap text-dim uppercase backdrop-blur-sm; }
+  .marquee > span { display: inline-block; animation: mq 45s linear infinite; }
+
+  /* rise: entrada del titular solo al llegar al sitio (html.nav = vino de otra página nuestra o de un POST).
+     Nunca en filas, .flash ni .error. */
+  .rise { animation: fade 1.1s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+  html.nav .rise { animation: none; }
+
+  /* Cursor: lente que invierte y crece sobre lo clicable; el puntero también es la luz de la escultura. */
+  .lens {
+    @apply pointer-events-none fixed top-0 left-0 z-50 -m-[11px] size-[22px] rounded-full bg-white mix-blend-difference;
+    transition: scale 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s;
+  }
+  .lens.hot { scale: 3; }
+  .lens.off { opacity: 0; }
+}
+
+@keyframes mq { to { transform: translateX(-50%); } }
+@keyframes fade { from { opacity: 0; filter: blur(12px); transform: translateY(40px); } }
+@keyframes out { to { opacity: 0; visibility: hidden; } }
+@keyframes busy { to { opacity: 0.3; } }
+@keyframes bar { from { translate: -100% 0; } to { translate: 100vw 0; } }
+
+/* Carga (Layout: astro:before-preparation → html.loading + aria-busy en lo pulsado). El pulso es inmediato
+   ("sí hiciste clic"); la barra espera 150 ms para no parpadear en redes rápidas. Animación: le gana a opacity-60. */
+:is(a, button)[aria-busy="true"] { animation: busy 0.6s ease-in-out infinite alternate; }
+html.loading body::after {
+  content: ""; position: fixed; top: 0; left: 0; z-index: 50; width: 30vw; height: 2px; background: var(--color-hi);
+  pointer-events: none; animation: bar 1.1s cubic-bezier(0.4, 0, 0.2, 1) 150ms infinite backwards;
+}
+
+@media (pointer: fine) {
+  html, a, button, summary, label { cursor: none; }
+  input, select, textarea { cursor: auto; }
+  /* Los popovers van en la capa superior, por encima del lente: ahí vuelve el cursor nativo. */
+  :popover-open, :popover-open * { cursor: auto; }
+  :popover-open :is(a, button) { cursor: pointer; }
+}
+@media not (pointer: fine) { .lens { display: none; } }
+/* En la disposición ancha la escultura dim va a la derecha del contenido (Sculpture.astro usa esta misma media query): el blur
+   de las superficies no tapa nada, pero como el canvas cambia en cada cuadro se recalcula siempre
+   (Firefox: ~13 % de GPU en una laptop). Fuera de la capa de componentes para ganarle a backdrop-blur-md. */
+@media (min-width: 761px) and (min-aspect-ratio: 4/3) {
+  [data-sculpture="dim"] :is(.box, .win, .row, .head) { backdrop-filter: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rise, .marquee > span { animation: none; }
+  :is(a, button)[aria-busy="true"] { animation: none; opacity: 0.4; }
+  html.loading body::after { animation: none; width: 100vw; }
+}
+
+/* Continuidad entre páginas (MPA): fundido corto del documento entero. Nada lleva view-transition-name: el canvas
+   opaco taparía el contenido durante el fundido y el nav aislado pierde su mix-blend-difference; la escultura
+   ya continúa su estado (Sculpture.astro), así que los dos cuadros casi coinciden.
+   Menú y plegables abren con fundido/altura en vez de aparecer de golpe. Navegadores sin soporte: igual que antes. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+  ::view-transition-group(*) { animation-duration: 0.22s; }
+
+  [popover], [popover]::backdrop { transition: opacity 0.2s, display 0.2s allow-discrete, overlay 0.2s allow-discrete; }
+  [popover]:not(:popover-open), [popover]:not(:popover-open)::backdrop { opacity: 0; }
+  @starting-style { [popover]:popover-open, [popover]:popover-open::backdrop { opacity: 0; } }
+
+  :root { interpolate-size: allow-keywords; }
+  details::details-content { block-size: 0; overflow: clip; overflow-clip-margin: 6px; transition: block-size 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), content-visibility 0.3s allow-discrete; }
+  details[open]::details-content { block-size: auto; }
+}

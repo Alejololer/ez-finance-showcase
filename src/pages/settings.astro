@@ -1,0 +1,260 @@
+---
+import { actions, isInputError } from 'astro:actions';
+import { PUBLIC_VAPID_PUBLIC_KEY } from 'astro:env/client';
+import Confirm from '../components/Confirm.astro';
+import Layout from '../layouts/Layout.astro';
+
+if (Astro.getActionResult(actions.logout)) return Astro.redirect('/login');
+
+const sb = Astro.locals.supabase;
+const token = Astro.getActionResult(actions.rotateToken);
+const category = Astro.getActionResult(actions.createCategory);
+const catErrors = isInputError(category?.error) ? category.error.fields : {};
+const test = Astro.getActionResult(actions.testPush);
+const [hasToken, categories, devices] = await Promise.all([
+  sb.from('ingest_tokens').select('created_at').maybeSingle(),
+  sb.from('categories').select('id, name, color').order('name'),
+  sb.from('push_subscriptions').select('id', { count: 'exact', head: true }),
+]);
+const nDevices = devices.count ?? 0;
+const ingestUrl = new URL('/api/ingest', Astro.url).href;
+// Proyecto de Apps Script sincronizado desde clients/ con clasp (docs/captura.md).
+const GMAIL_TEMPLATE = 'https://script.google.com/d/YOUR_APPS_SCRIPT_ID/edit';
+---
+<Layout title="Ajustes" path="ajustes" flash={(category && !category.error && 'categoría agregada') ||
+  (test?.data && `prueba enviada a ${test.data.sent} ${test.data.sent === 1 ? 'dispositivo' : 'dispositivos'}`)}>
+  <section class="win">
+    <header class="win-bar"><span>captura</span></header>
+    <div class="win-body">
+      <p class="text-dim">
+        Gmail, Android y iPhone envían tus avisos a esta dirección con el token. Es uno solo para todos tus
+        dispositivos: guárdalo al generarlo, porque no se vuelve a mostrar.
+      </p>
+      <code class="box block p-3 text-sm break-all">{ingestUrl}</code>
+      {token?.data ? (
+        <div class="flex flex-col gap-2">
+          <p class="text-base text-warn">Cópialo ahora: no se volverá a mostrar.</p>
+          <code class="block border border-warn/50 p-3 text-sm break-all select-all">{token.data.token}</code>
+        </div>
+      ) : (
+        <p class="meta">{hasToken.data ? `token activo desde ${hasToken.data.created_at.slice(0, 10)}` : 'aún no tienes un token'}</p>
+      )}
+      {token?.error && <p class="error">{token.error.message}</p>}
+      <form method="POST" action={actions.rotateToken}>
+        {hasToken.data ? (
+          <Confirm id="rotate" question="El token actual dejará de funcionar en todos tus dispositivos. ¿Continuar?"
+            yes="sí, regenerar" pending="generando…">regenerar token</Confirm>
+        ) : (
+          <button class="btn" data-pending="generando…">generar token</button>
+        )}
+      </form>
+    </div>
+  </section>
+
+  <details class="win">
+    <summary class="win-bar">gmail</summary>
+    <div class="win-body"><ol class="flex list-decimal flex-col gap-3 pl-5 text-dim">
+      <li>Abre la <a class="text-fg underline" href={GMAIL_TEMPLATE} target="_blank" rel="noopener">plantilla de Gmail</a> con
+        tu cuenta de Google y toca <span class="text-fg">Hacer una copia</span> (en Descripción general).</li>
+      <li>En <code class="text-fg">gmail.gs</code>, línea 5, reemplaza <code class="text-fg">PEGA_AQUI_TU_TOKEN</code> por tu token.</li>
+      <li>Arriba elige la función <code class="text-fg">install</code> y toca <span class="text-fg">Ejecutar</span>. Google avisa que la
+        app no está verificada (es tu propia copia): <span class="text-fg">Configuración avanzada → Ir a…</span> y acepta los permisos.</li>
+      <li>Listo: crea la etiqueta y los filtros de Pichincha y PacifiCard, y cada 5 minutos envía los avisos nuevos.</li>
+    </ol></div>
+  </details>
+
+  <details class="win">
+    <summary class="win-bar">android</summary>
+    <div class="win-body"><ol class="flex list-decimal flex-col gap-3 pl-5 text-dim">
+      <li>Instala MacroDroid → <span class="text-fg">Añadir macro</span>.</li>
+      <li>Disparador: <span class="text-fg">Notificación recibida</span> → apps Banco Pichincha y DeUna, sin filtro de texto.
+        Concede el acceso a notificaciones.</li>
+      <li>Acción: <span class="text-fg">Solicitud HTTP</span> → POST a la dirección de arriba, encabezado
+        <code class="text-fg">Authorization</code> = <code class="text-fg">Bearer</code> + espacio + tu token, cuerpo JSON
+        <code class="text-fg break-all">{'{"source":"android","text":"[app_name] [hour]:[minute] [notification_title] [notification]"}'}</code>.</li>
+      <li>En Ajustes de Android → MacroDroid → Batería → <span class="text-fg">Sin restricciones</span>, para que no se duerma.</li>
+    </ol></div>
+  </details>
+
+  <details class="win">
+    <summary class="win-bar">iphone (ios 27)</summary>
+    <div class="win-body"><ol class="flex list-decimal flex-col gap-3 pl-5 text-dim">
+      <li>Atajos → <span class="text-fg">Automatización</span> → ＋ → <span class="text-fg">Notificación</span> → apps Banco Pichincha y
+        DeUna, sin filtro de mensaje. Elige <span class="text-fg">Ejecutar inmediatamente</span>.</li>
+      <li>Acción <span class="text-fg">Obtener contenido de URL</span>: la dirección de arriba, método POST, encabezado
+        <code class="text-fg">Authorization</code> = <code class="text-fg">Bearer</code> + espacio + tu token.</li>
+      <li>Cuerpo JSON con dos campos de texto: <code class="text-fg">source</code> = <code class="text-fg">ios</code> y
+        <code class="text-fg">text</code> = la variable <span class="text-fg">Notificación</span>.</li>
+    </ol></div>
+  </details>
+
+  <p class="meta">
+    el celular envía todos los avisos de pichincha y deuna: los que también llegan por correo se juntan solos. si mantienes
+    saldo en deuna, crea una cuenta llamada "DeUna" para que las recargas y pagos se registren ahí. macrodroid y
+    atajos leen las notificaciones de tu teléfono, y el token queda guardado ahí: si pierdes el teléfono, regenéralo.
+  </p>
+
+  {/* Estado por dispositivo (permiso, suscripción, iPhone fuera de la pantalla de inicio): lo decide el script de
+      abajo; sin JS queda solo el texto inicial. */}
+  <section class="win" id="push" data-key={PUBLIC_VAPID_PUBLIC_KEY ?? ''}>
+    <header class="win-bar"><span>notificaciones</span></header>
+    <div class="win-body">
+      <p class="text-dim">Te avisamos en el celular o el computador cuando llega algo nuevo a tu bandeja, para que lo confirmes.</p>
+      {PUBLIC_VAPID_PUBLIC_KEY ? (
+        <>
+          <p class="meta" data-push-status>revisando este dispositivo…</p>
+          <ol class="hidden list-decimal flex-col gap-3 pl-5 text-dim" data-push-ios>
+            <li>Abre esta página en Safari y toca <span class="text-fg">Compartir</span> → <span class="text-fg">Añadir a pantalla de inicio</span> (deja
+              activado <span class="text-fg">Abrir como app web</span>).</li>
+            <li>Abre ez-finance desde el ícono nuevo, ingresa y vuelve aquí a <span class="text-fg">activar en este dispositivo</span>.</li>
+          </ol>
+          <p class="error hidden" data-push-error role="alert"></p>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="btn hidden flex-1 sm:flex-none" data-push="on">activar en este dispositivo</button>
+            <form method="POST" action={actions.testPush} class="hidden" data-push="test">
+              <button class="btn" data-pending="enviando…">enviar prueba</button>
+            </form>
+            <button type="button" class="btn-ghost hidden" data-push="off">desactivar en este dispositivo</button>
+          </div>
+          {test?.error && <p class="error">{test.error.message}</p>}
+          {nDevices > 0 && <p class="meta">{nDevices} {nDevices === 1 ? 'dispositivo recibe' : 'dispositivos reciben'} notificaciones</p>}
+        </>
+      ) : (
+        <p class="meta">aún no están configuradas en el servidor.</p>
+      )}
+    </div>
+  </section>
+
+  <section class="win">
+    <header class="win-bar"><span>categorías</span></header>
+    <div class="win-body">
+      <div class="flex flex-wrap gap-2">
+        {categories.data?.map((c) => (
+          <span class="flex items-center gap-2 rounded-full border border-line px-3 py-1 text-sm">
+            <span class="size-2.5" style={`background:${c.color}`}></span>{c.name.toLowerCase()}
+          </span>
+        ))}
+      </div>
+      <form method="POST" action={actions.createCategory} class="flex flex-wrap items-end gap-2">
+        <label class="label min-w-40 flex-1">Nueva categoría
+          <input class="input" name="name" required maxlength="40" />
+          {catErrors.name && <span class="error">{catErrors.name[0]}</span>}
+        </label>
+        <input type="color" name="color" value="#8c8c8c" class="h-11 w-12 border border-line bg-transparent" aria-label="Color" />
+        <button class="btn" data-pending="agregando…">agregar</button>
+      </form>
+      {category?.error && !isInputError(category.error) && <p class="error">{category.error.message}</p>}
+    </div>
+  </section>
+
+  <p class="meta">pista: escribe <span class="text-fg">vapor</span> en cualquier pantalla.</p>
+
+  <form method="POST" action={actions.logout}>
+    <button class="btn-ghost" data-pending="saliendo…">cerrar sesión</button>
+  </form>
+</Layout>
+
+<script>
+  import { actions } from 'astro:actions';
+  import { navigate } from 'astro:transitions/client';
+
+  // Con el ClientRouter este módulo corre una sola vez: el estado se recalcula en cada llegada a /settings
+  // (astro:page-load) y los clics se escuchan en document.
+  const $ = (sel: string) => document.querySelector<HTMLElement>(sel);
+  const ios = () => /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = () => matchMedia('(display-mode: standalone)').matches || (navigator as { standalone?: boolean }).standalone === true;
+  const supported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const device = () => (ios() ? 'iPhone/iPad' : /Android/.test(navigator.userAgent) ? 'Android' : 'Navegador') + ' · ' + navigator.userAgent.slice(0, 150);
+
+  // Clave pública VAPID (base64url) → bytes, como la pide pushManager.subscribe.
+  const keyBytes = (b64: string) => {
+    const bin = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64.length % 4)) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  };
+  // Firefox en Android devuelve applicationServerKey null en getSubscription(): clave desconocida, no distinta.
+  // ponytail: si se regeneran las VAPID, ahí no se detecta; el envío falla y "enviar prueba" pide reactivar.
+  const otherKey = (sub: PushSubscription, b: Uint8Array) => {
+    const a = sub.options?.applicationServerKey;
+    return !!a && !(a.byteLength === b.length && new Uint8Array(a).every((x, i) => x === b[i]));
+  };
+
+  async function registration() {
+    await navigator.serviceWorker.register('/sw.js');
+    return navigator.serviceWorker.ready;
+  }
+
+  function show(state: 'ios' | 'unsupported' | 'denied' | 'on' | 'off', error = '') {
+    const status = $('[data-push-status]');
+    if (!status) return;
+    status.textContent = {
+      ios: 'en iPhone y iPad las notificaciones funcionan con ez-finance en la pantalla de inicio (iOS 16.4 o más reciente):',
+      unsupported: 'este navegador no admite notificaciones.',
+      denied: 'bloqueaste las notificaciones de ez-finance: actívalas en los ajustes del navegador (en iPhone: Ajustes → Notificaciones → ez-finance) y vuelve aquí.',
+      on: 'activas en este dispositivo.',
+      off: 'desactivadas en este dispositivo.',
+    }[state];
+    $('[data-push-ios]')?.classList.toggle('hidden', state !== 'ios');
+    $('[data-push-ios]')?.classList.toggle('flex', state === 'ios');
+    $('[data-push="on"]')?.classList.toggle('hidden', state !== 'off');
+    $('[data-push="test"]')?.classList.toggle('hidden', state !== 'on');
+    $('[data-push="off"]')?.classList.toggle('hidden', state !== 'on');
+    const err = $('[data-push-error]');
+    if (err) { err.textContent = error; err.classList.toggle('hidden', !error); }
+  }
+
+  async function save(sub: PushSubscription) {
+    const { error } = await actions.savePushSubscription({ ...(sub.toJSON() as { endpoint: string; keys: { p256dh: string; auth: string } }), device: device() });
+    if (error) throw error;
+  }
+
+  async function refresh() {
+    const box = $('#push');
+    if (!box?.dataset.key || !$('[data-push-status]')) return;
+    if (!supported()) return show(ios() && !standalone() ? 'ios' : 'unsupported');
+    if (Notification.permission === 'denied') return show('denied');
+    const sub = await (await registration()).pushManager.getSubscription();
+    const active = Notification.permission === 'granted' && sub && !otherKey(sub, keyBytes(box.dataset.key));
+    show(active ? 'on' : 'off');
+    // Se vuelve a guardar en cada visita: cubre una base limpiada o una sesión de otra persona en este navegador.
+    if (active) save(sub).catch(() => {});
+  }
+
+  async function enable(key: string) {
+    // iOS exige pedir el permiso directo en el toque, antes de cualquier otra espera.
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return show(perm === 'denied' ? 'denied' : 'off');
+    const reg = await registration();
+    let sub = await reg.pushManager.getSubscription();
+    // Suscripción con otra clave (se regeneraron las VAPID): hay que rehacerla.
+    if (sub && otherKey(sub, keyBytes(key))) { await sub.unsubscribe(); sub = null; }
+    sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
+    await save(sub);
+  }
+
+  async function disable() {
+    const sub = await (await registration()).pushManager.getSubscription();
+    if (!sub) return;
+    const { error } = await actions.deletePushSubscription({ endpoint: sub.endpoint });
+    if (error) throw error;
+    await sub.unsubscribe();
+  }
+
+  document.addEventListener('astro:page-load', () => { refresh().catch((e) => show('off', String(e?.message ?? e))); });
+  document.addEventListener('click', async (e) => {
+    const b = (e.target as Element | null)?.closest<HTMLButtonElement>('#push button[data-push="on"], #push button[data-push="off"]');
+    const key = $('#push')?.dataset.key;
+    if (!b || !key) return;
+    b.disabled = true;
+    b.setAttribute('aria-busy', 'true');
+    try {
+      await (b.dataset.push === 'on' ? enable(key) : disable());
+      // Recarga la página (sin recargar el documento) para actualizar el conteo de dispositivos.
+      await navigate(location.pathname);
+    } catch (err) {
+      show(b.dataset.push === 'on' ? 'off' : 'on', `No se pudo ${b.dataset.push === 'on' ? 'activar' : 'desactivar'}: ${(err as Error)?.message ?? err}`);
+    } finally {
+      b.disabled = false;
+      b.removeAttribute('aria-busy');
+    }
+  });
+</script>

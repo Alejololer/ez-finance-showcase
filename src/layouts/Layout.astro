@@ -1,0 +1,252 @@
+---
+import { actions } from 'astro:actions';
+import { ClientRouter } from 'astro:transitions';
+import '../styles/global.css';
+import Report from '../components/Report.astro';
+import Sculpture from '../components/Sculpture.astro';
+import { held } from '../lib/money';
+
+interface Props {
+  title: string; // titular grande y <title>
+  em?: string; // segunda línea del titular, en cursiva
+  path?: string; // eyebrow sobre el titular, ej. "bandeja · 3 pendientes" (se antepone el número de sección)
+  flash?: string | false | null; // confirmación de la última acción
+  sculpture?: 'hero' | 'dim'; // hero: escultura protagonista (inicio, login); dim: atenuada detrás del contenido
+}
+const { title, em, path, sculpture = 'dim' } = Astro.props;
+// El reporte se envía desde cualquier página: su resultado se muestra aquí y no en cada página.
+const report = Astro.getActionResult(actions.sendReport);
+const flash = Astro.props.flash || (report && !report.error && (report.data.kind === 'bug' ? 'falla reportada, gracias' : 'idea enviada, gracias'));
+const sb = Astro.locals.supabase;
+const here = Astro.url.pathname;
+
+let inbox = 0;
+if (Astro.locals.userId) {
+  const [tx, ev] = await Promise.all([
+    // Una transferencia son dos filas: se cuenta solo la pata de salida. Lo retenido (held) no se cuenta.
+    sb.from('transactions').select('source, created_at').eq('status', 'pending').or('transfer_id.is.null,amount_cents.lt.0'),
+    sb.from('ingest_events').select('source, received_at').eq('status', 'review'),
+  ]);
+  inbox = (tx.data ?? []).filter((t) => !held(t.source, t.created_at)).length +
+    (ev.data ?? []).filter((e) => !held(e.source, e.received_at)).length;
+}
+const ROMAN = ['I', 'II', 'III', 'IV', 'V'];
+const tabs = [
+  ['/', 'inicio'],
+  ['/inbox', 'bandeja'],
+  ['/transactions', 'movimientos'],
+  ['/accounts', 'cuentas'],
+  ['/settings', 'ajustes'],
+];
+const section = tabs.findIndex(([href]) => href === here);
+const eyebrow = path && (section >= 0 ? `${ROMAN[section]} — ${path}` : path);
+---
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#050505" />
+    {/* Fondo negro desde el primer byte: sin esto, al recargar se ve el lienzo blanco del navegador
+        hasta que llega global.css. */}
+    <meta name="color-scheme" content="dark" />
+    <style is:inline>html { background: #050505; }</style>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    {/* App instalable: en iPhone (iOS 16.4+) las notificaciones push solo funcionan con la app en la pantalla de
+        inicio, y para eso Safari necesita el manifest (display standalone). */}
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="ez-finance" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;1,9..144,300&family=Inter+Tight:wght@300;500&display=swap" rel="stylesheet" />
+    <title>{title.toLowerCase()} · ez-finance</title>
+    <script is:inline>
+      try { if (localStorage.getItem('vapor') === '1') document.documentElement.classList.add('vapor'); } catch {}
+      // Viene de otra página del sitio (o de un POST): el titular no vuelve a "entrar", la view transition basta.
+      if (document.referrer.startsWith(location.origin + '/')) document.documentElement.classList.add('nav');
+    </script>
+    {/* No pintar hasta tener el documento entero: así se restaura el scroll (abajo) antes del primer cuadro. */}
+    <link rel="expect" href="#fin" blocking="render" />
+    {/* Navegación sin recargar el documento: sin esto Firefox (que no tiene view transitions entre documentos)
+        muestra su lienzo gris en cada cambio de página. Escultura y lente persisten entre páginas. */}
+    <ClientRouter />
+  </head>
+  <body data-sculpture={sculpture} data-pending={inbox}>
+    <Sculpture />
+    <div class="lens" aria-hidden="true" transition:persist></div>
+
+    {Astro.locals.userId && (
+      <>
+        {/* Fundido bajo el nav: el contenido que pasa por debajo no choca con λ ni con las pestañas. */}
+        <div class="pointer-events-none fixed inset-x-0 top-0 z-20 h-20 bg-linear-to-b from-bg via-bg/80 to-transparent" aria-hidden="true"></div>
+        <nav class="fixed inset-x-0 top-0 z-30 flex items-baseline justify-between px-6 py-5 text-white mix-blend-difference sm:px-[5vw]">
+          <a href="/" class="font-serif text-3xl leading-none" aria-label="ez-finance">λ</a>
+          <div class="hidden items-baseline gap-7 sm:flex">
+            {tabs.map(([href, label], i) => (
+              <a href={href} data-key={i} aria-current={here === href ? 'page' : undefined}
+                class:list={['border-b pb-1 text-xs tracking-[0.25em] uppercase transition-opacity', here === href ? 'border-current' : 'border-transparent opacity-60 hover:opacity-100']}>
+                <span class="mr-1.5 text-[10px] tracking-[0.2em] opacity-60">{ROMAN[i]}</span>{label}{i === 1 && inbox > 0 && ` (${inbox})`}
+              </a>
+            ))}
+            <button popovertarget="report" class="border-b border-transparent pb-1 text-xs tracking-[0.25em] uppercase opacity-60 transition-opacity hover:opacity-100">reportar</button>
+          </div>
+          <button popovertarget="menu" class="text-xs tracking-[0.25em] uppercase sm:hidden">menú{inbox > 0 && ` · ${inbox}`}</button>
+        </nav>
+
+        {/* Popover nativo: capa superior sin JS, Esc y toque afuera la cierran. */}
+        <div id="menu" popover class="fixed inset-0 m-0 hidden size-full max-h-none max-w-none flex-col overflow-y-auto bg-bg/95 px-6 pt-5 pb-10 text-fg backdrop-blur-xl open:flex">
+          <div class="flex items-baseline justify-between pb-10 cover:pb-4">
+            <span class="font-serif text-3xl leading-none">λ</span>
+            <button popovertarget="menu" popovertargetaction="hide" class="text-xs tracking-[0.25em] uppercase">cerrar</button>
+          </div>
+          {tabs.map(([href, label], i) => (
+            <a href={href} class="row cover:py-2.5" aria-current={here === href ? 'page' : undefined}>
+              <span class="n">{ROMAN[i]}</span>
+              {/* Activa como en el nav ancho: subrayado, misma fuente; las demás atenuadas. */}
+              <span class:list={['font-serif text-4xl decoration-1 cover:text-2xl underline-offset-8', here === href ? 'underline' : 'opacity-60']}>{label}</span>
+              {i === 1 && inbox > 0 && <span class="meta ml-auto">{inbox} {inbox === 1 ? 'pendiente' : 'pendientes'}</span>}
+            </a>
+          ))}
+          <button popovertarget="report" class="meta mt-auto self-start">reportar una falla o idea</button>
+        </div>
+        <Report />
+      </>
+    )}
+
+    <main class="relative z-10 flex w-full max-w-3xl flex-col gap-8 px-6 pt-28 pb-24 cover:gap-6 cover:pt-20 sm:ml-[5vw] sm:w-[90vw] sm:px-0 sm:pt-36">
+      <header class="flex flex-col gap-5 pb-2 cover:pb-0">
+        {eyebrow && <p class="prompt rise cover:hidden">{eyebrow}</p>}
+        <h1 class="display rise">{title}{em && <><br /><i>{em}</i></>}</h1>
+      </header>
+      {flash && <p class="flash toast" role="status">{flash}</p>}
+      {report?.error && <p class="error">{report.error.message}</p>}
+      <slot />
+    </main>
+    <footer class="meta relative z-10 flex flex-wrap justify-between gap-4 px-6 pb-10 sm:px-[5vw]">
+      <span>ez-finance — hecho en Quito.</span>
+    </footer>
+
+    <script is:inline>
+      // Tras un POST la página vuelve a la misma altura: en la bandeja el ítem siguiente ocupa el lugar del
+      // confirmado y el fundido entre páginas queda alineado (sin saltar arriba).
+      // Con el ClientRouter este script corre una sola vez: lo que dependa de la página va en astro:after-swap
+      // (el router reemplaza los atributos de <html>, así que vapor y nav se vuelven a poner).
+      const restore = () => {
+        try {
+          const s = JSON.parse(sessionStorage.getItem('scroll'));
+          sessionStorage.removeItem('scroll');
+          if (s?.path === location.pathname) scrollTo(0, s.y);
+        } catch {}
+      };
+      // Tras un envío la URL queda como /inbox?_action=…&item=…: se limpia para que F5 o un marcador no
+      // apunten a la acción (en un POST sin router, replaceState además hace que F5 sea un GET sin reenvío).
+      const clean = () => {
+        const u = new URL(location.href);
+        if (!u.searchParams.has('_action')) return;
+        u.searchParams.delete('_action');
+        u.searchParams.delete('item');
+        history.replaceState(history.state, '', u);
+      };
+      // Rastro para los reportes: últimos 30 pasos (navegación, envíos, errores) en sessionStorage.
+      // Los errores JS además se guardan solos en `reports` (máx. 5 por página cargada).
+      const trail = (type, data) => {
+        try {
+          const t = JSON.parse(sessionStorage.getItem('trail') ?? '[]');
+          t.push({ at: new Date().toISOString().slice(11, 19), type, path: location.pathname, ...data });
+          sessionStorage.setItem('trail', JSON.stringify(t.slice(-30)));
+        } catch {}
+      };
+      let sent = 0;
+      const oops = (message, stack) => {
+        trail('error', { message: String(message).slice(0, 300) });
+        if (sent++ >= 5) return;
+        let t = null;
+        try { t = JSON.parse(sessionStorage.getItem('trail')); } catch {}
+        fetch('/_actions/logClientError', {
+          method: 'POST', keepalive: true, headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ message: String(message).slice(0, 2000), stack: stack?.slice(0, 8000) ?? null, path: location.pathname, trail: t }),
+        }).catch(() => {});
+      };
+      addEventListener('error', (e) => oops(e.message, e.error?.stack));
+      addEventListener('unhandledrejection', (e) => oops(e.reason?.message ?? e.reason, e.reason?.stack));
+      trail('load', { from: document.referrer.startsWith(location.origin) ? new URL(document.referrer).pathname : null });
+      restore();
+      clean();
+      // Service worker de las notificaciones push (public/sw.js) y número de pendientes en el ícono de la app
+      // instalada (Android, iPhone en la pantalla de inicio). Sin soporte o sin permiso, no hace nada.
+      navigator.serviceWorker?.register('/sw.js').catch(() => {});
+      const badge = () => {
+        const n = Number(document.body.dataset.pending) || 0;
+        try { (n ? navigator.setAppBadge?.(n) : navigator.clearAppBadge?.())?.catch(() => {}); } catch {}
+      };
+      badge();
+      // Feedback de carga (red lenta): el enlace o botón pulsado late y aparece una barra arriba hasta el cambio.
+      // El swap reemplaza body y los atributos de <html>, así que ambos se van solos.
+      document.addEventListener('astro:before-preparation', (e) => {
+        document.documentElement.classList.add('loading');
+        e.sourceElement?.setAttribute('aria-busy', 'true');
+      });
+      document.addEventListener('astro:after-swap', () => {
+        trail('nav', {});
+        const html = document.documentElement;
+        html.classList.remove('loading');
+        try { html.classList.toggle('vapor', localStorage.getItem('vapor') === '1'); } catch {}
+        html.classList.add('nav');
+        restore();
+        clean();
+        badge();
+      });
+      // Bloquea el botón durante el envío y muestra el texto de progreso (data-pending).
+      document.addEventListener('submit', (e) => {
+        const b = e.submitter;
+        if (!b || e.defaultPrevented) return;
+        const f = e.target;
+        trail('submit', { action: new URL(f.action, location.href).searchParams.get('_action') });
+        if (f.elements.trail) {
+          f.elements.path.value = location.pathname + location.search;
+          f.elements.client.value = `${navigator.userAgent} · ${innerWidth}x${innerHeight}@${devicePixelRatio} · ${navigator.language}`;
+          f.elements.trail.value = sessionStorage.getItem('trail') ?? '[]';
+        }
+        try { sessionStorage.setItem('scroll', JSON.stringify({ path: location.pathname, y: scrollY })); } catch {}
+        setTimeout(() => { b.disabled = true; if (b.dataset.pending) b.textContent = b.dataset.pending; });
+      });
+      // Atajos: 0-4 salta de sección; escribir "vapor" activa el modo neón.
+      let typed = '';
+      document.addEventListener('keydown', (e) => {
+        if (e.target instanceof Element && e.target.closest('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
+        const tab = document.querySelector(`nav [data-key="${e.key}"]`);
+        if (tab) return tab.click();
+        typed = (typed + e.key).slice(-5);
+        if (typed === 'vapor') {
+          const on = document.documentElement.classList.toggle('vapor');
+          try { localStorage.setItem('vapor', on ? '1' : '0'); } catch {}
+        }
+      });
+      // Lente: es el cursor, así que va 1:1 con el puntero (sin suavizado); crece sobre lo clicable y se oculta sobre
+      // los campos (queda el cursor nativo). Arranca donde quedó el puntero en la página anterior.
+      const lens = document.querySelector('.lens');
+      if (matchMedia('(pointer: fine)').matches) {
+        let saved = null;
+        try { saved = JSON.parse(sessionStorage.getItem('pointer')); } catch {}
+        const cur = saved ?? { x: -100, y: -100 };
+        let moved = false;
+        const aim = (el) => {
+          // Firefox puede dar el documento (o un nodo de texto) como destino del puntero: no tienen closest().
+          if (!(el instanceof Element)) el = null;
+          lens.classList.toggle('hot', !!el?.closest('a, button, summary'));
+          lens.classList.toggle('off', !!el?.closest('input, select, textarea'));
+        };
+        if (saved) { aim(document.elementFromPoint(cur.x, cur.y)); lens.style.translate = `${cur.x}px ${cur.y}px`; }
+        addEventListener('pointermove', (e) => {
+          cur.x = e.clientX; cur.y = e.clientY; moved = true;
+          aim(e.target);
+          lens.style.translate = `${cur.x}px ${cur.y}px`;
+        });
+        addEventListener('pagehide', () => { try { if (moved || saved) sessionStorage.setItem('pointer', JSON.stringify(cur)); } catch {} });
+        document.documentElement.addEventListener('pointerleave', () => lens.classList.add('off'));
+      }
+    </script>
+    <template id="fin"></template>
+  </body>
+</html>

@@ -1,0 +1,24 @@
+---
+// Reporte de falla o idea del piloto: popover con el form. Lo abre cualquier botón con popovertarget="report"
+// (nav ancho y menú del celular; nunca en el pie, quedaba encima de la escultura). path, client y trail los llena el script del Layout al enviar.
+import { actions } from 'astro:actions';
+---
+<div id="report" popover class="confirm box">
+  <form method="POST" action={actions.sendReport} class="flex flex-col gap-4">
+    <p class="font-serif text-xl italic">¿Algo falló o se te ocurre una mejora?</p>
+    <div class="flex gap-5">
+      <label class="flex items-center gap-2"><input type="radio" name="kind" value="bug" checked /> falla</label>
+      <label class="flex items-center gap-2"><input type="radio" name="kind" value="idea" /> idea</label>
+    </div>
+    <textarea name="message" required minlength="3" maxlength="2000" rows="5" class="input cover:h-20"
+      placeholder="Qué hacías, qué esperabas y qué pasó"></textarea>
+    <p class="meta">Se envía con la página, tu navegador y los últimos pasos en la app. Nunca tus montos.</p>
+    <input type="hidden" name="path" />
+    <input type="hidden" name="client" />
+    <input type="hidden" name="trail" />
+    <div class="flex flex-wrap gap-2">
+      <button class="btn flex-1 whitespace-nowrap" data-pending="enviando…">enviar</button>
+      <button type="button" class="btn-ghost flex-1 whitespace-nowrap" popovertarget="report" popovertargetaction="hide">cancelar</button>
+    </div>
+  </form>
+</div>

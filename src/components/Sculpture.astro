@@ -1,0 +1,174 @@
+---
+// Escultura 1-bit de fondo (prototipo statue hall) sin three.js: raymarch de una esfera deformada con ruido,
+// tramada con Bayer 4×4 y dibujada a 1/3 de resolución, así la trama sale gruesa y el costo es mínimo.
+// El puntero es la luz; scroll y velocidad del puntero la hacen "hervir"; la bandeja pendiente también.
+// Con el ClientRouter el canvas persiste entre páginas (el script corre una vez y lee hero/pendientes de la
+// página actual en cada cuadro). Al recargar, el estado (tiempo, luz, hero) viaja en sessionStorage, y el script
+// es inline para dibujar el primer cuadro antes del primer render.
+---
+<canvas id="sculpture" aria-hidden="true" transition:persist></canvas>
+
+<style>
+  #sculpture { position: fixed; inset: 0; z-index: 0; width: 100%; height: 100%; pointer-events: none; image-rendering: pixelated; }
+</style>
+
+<script is:inline>
+  (() => {
+  const canvas = document.getElementById('sculpture');
+  const gl = canvas.getContext('webgl', { antialias: false, alpha: false });
+
+  const VERT = 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0., 1.); }';
+  const FRAG = `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
+    precision mediump float;
+    #endif
+    uniform vec2 res; uniform float t, amp, freq, vapor, op; uniform vec3 lp, pos; uniform mat3 rot;
+    float h(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+    // Interpolación quíntica (no la cúbica 3f²-2f³): la curvatura también es continua entre celdas, así la luz no
+    // marca pliegues rectos y la superficie no se ve facetada.
+    float noise(vec3 p){ vec3 i = floor(p), f = fract(p); f = f*f*f*(f*(f*6.-15.)+10.);
+      return mix(mix(mix(h(i), h(i+vec3(1,0,0)), f.x), mix(h(i+vec3(0,1,0)), h(i+vec3(1,1,0)), f.x), f.y),
+                 mix(mix(h(i+vec3(0,0,1)), h(i+vec3(1,0,1)), f.x), mix(h(i+vec3(0,1,1)), h(i+vec3(1,1,1)), f.x), f.y), f.z); }
+    // pos.xy = centro, pos.z = escala. La deformación se calcula en espacio del objeto (radio 2.2, como el prototipo).
+    float sdf(vec3 p){ vec3 q = rot * (p - vec3(pos.xy, 0.)) / pos.z;
+      float d = noise(q*freq + t*.4)*amp + sin(q.y*freq*2. + t)*amp*.3;
+      return (length(q) - 2.2 - d) * pos.z * .6; }
+    float bayer2(vec2 a){ a = floor(a); return fract(dot(a, vec2(.5, a.y*.75))); }
+    float bayer4(vec2 a){ return bayer2(.5*a)*.25 + bayer2(a); }
+    void main(){
+      vec2 uv = (gl_FragCoord.xy - .5*res) / (.5*res.y);
+      vec3 ro = vec3(0, 0, 9), rd = normalize(vec3(uv * .364, -1.)); // fov 40°, cámara a 9 como el prototipo
+      vec3 c = vec3(pos.xy, 0.) - ro; float b = dot(c, rd);
+      float v = 0.;
+      if (length(c - rd*b) < 3.6*pos.z) { // descarta rayos que ni rozan la esfera
+        float s = b - 3.6*pos.z; bool hit = false;
+        for (int i = 0; i < 56; i++) { float d = sdf(ro + rd*s); if (d < .002) { hit = true; break; } s += d; if (s > b + 4.*pos.z) break; }
+        if (hit) {
+          vec3 p = ro + rd*s; vec2 e = vec2(.01, -.01);
+          vec3 n = normalize(e.xyy*sdf(p+e.xyy) + e.yyx*sdf(p+e.yyx) + e.yxy*sdf(p+e.yxy) + e.xxx*sdf(p+e.xxx));
+          float lit = max(dot(n, normalize(lp)), 0.)*.9 + pow(1. - max(dot(n, -rd), 0.), 3.)*.6;
+          v = step(bayer4(gl_FragCoord.xy), lit);
+        }
+      }
+      vec3 on = mix(vec3(1), mix(vec3(1., .44, .81), vec3(.004, .8, .996), gl_FragCoord.y / res.y), vapor);
+      gl_FragColor = vec4(mix(vec3(.02), on, v * op), 1.); // op: opacidad sobre el fondo #050505
+    }`;
+
+  if (!gl) return;
+  const prog = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, VERT], [gl.FRAGMENT_SHADER, FRAG]]) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    gl.attachShader(prog, sh);
+  }
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const u = Object.fromEntries(['res', 't', 'amp', 'freq', 'vapor', 'op', 'lp', 'pos', 'rot'].map((k) => [k, gl.getUniformLocation(prog, k)]));
+
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Disposición ancha: la misma media query que global.css (blur de superficies). Con solo el ancho, una tablet
+  // vertical ponía la escultura plena a la derecha mientras el contenido seguía a todo el ancho, encima.
+  const wideMQ = matchMedia('(min-width: 761px) and (min-aspect-ratio: 4/3)');
+  const page = () => document.body.dataset; // cambia con cada navegación del router
+  const H0 = page().sculpture === 'hero' ? 1 : 0;
+  let saved = {};
+  try { saved = JSON.parse(sessionStorage.getItem('sculpture')) || {}; } catch {}
+
+  // shown: el último cuadro dibujado tenía la escultura en pantalla; dirty: el buffer se borró (resize) y hay que redibujar.
+  let shown = true, dirty = true;
+  function size() {
+    canvas.width = Math.ceil(innerWidth / 3);
+    canvas.height = Math.ceil(innerHeight / 3);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    dirty = true;
+  }
+  addEventListener('resize', () => { size(); if (still) frame(); });
+  if (still) document.addEventListener('astro:after-swap', () => frame());
+  size();
+
+  // h: factor hero (1 en inicio/login, 0 en el resto); se interpola desde la página anterior en vez de saltar.
+  let p = saved.p ?? 0, target = 0, t = saved.t ?? 0, h = still ? H0 : saved.h ?? H0, vel = 0, pvel = 0;
+  const m = saved.m ?? { x: -0.5, y: 0.6 }, s = saved.s ?? { ...m }, cur = { x: NaN, y: NaN };
+  // El recorrido se mide sobre al menos una pantalla: en páginas cortas (login, inicio: ~100-200 px de scroll)
+  // una vuelta de rueda llevaba p de 0 a 1 de golpe y la escultura se deformaba de más.
+  addEventListener('scroll', () => {
+    target = scrollY / Math.max(innerHeight, document.documentElement.scrollHeight - innerHeight);
+    if (still) frame(); // en celular sigue al encabezado aunque no haya animación
+  }, { passive: true });
+  addEventListener('pointermove', (e) => {
+    if (!Number.isNaN(cur.x)) pvel = Math.min(1, pvel + Math.hypot(e.clientX - cur.x, e.clientY - cur.y) / 600);
+    cur.x = e.clientX; cur.y = e.clientY;
+    m.x = (cur.x / innerWidth) * 2 - 1; m.y = 1 - (cur.y / innerHeight) * 2;
+  });
+  addEventListener('pagehide', () => {
+    try { sessionStorage.setItem('sculpture', JSON.stringify({ t, p, h, m, s })); } catch {}
+  });
+
+  // n = cuadros de 120 Hz transcurridos: las constantes se calibraron a ojo a 120 Hz y n las escala, así el
+  // aspecto no depende de cuántos cuadros se dibujen (pvel sube por evento del puntero, no por cuadro).
+  function frame(n = 1) {
+    const ease = (k) => 1 - (1 - k) ** n;
+    const prev = p;
+    const H = page().sculpture === 'hero' ? 1 : 0;
+    const pending = Math.min(10, Number(page().pending) || 0);
+    p += (target - p) * ease(0.06); t += 0.016 * n; h = still ? H : h + (H - h) * ease(0.06);
+    s.x += (m.x - s.x) * ease(0.06); s.y += (m.y - s.y) * ease(0.06);
+    pvel *= 0.95 ** n;
+    vel += (Math.abs(p - prev) * 60 / n + pvel * 0.15 - vel) * ease(0.1);
+    const aspect = innerWidth / innerHeight;
+    const wide = wideMQ.matches;
+    // En escritorio el texto va a la izquierda: la escultura vive a la derecha y oscila con el scroll.
+    // En celular el texto ocupa todo el ancho y detrás de él la escultura solo asomaba en franjas entre superficies:
+    // va más chica en la esquina superior derecha, junto al titular, y anclada al scroll (se va con el encabezado).
+    // 3.28 = unidades de escena por media pantalla en z = 0 (cámara a 9, fov 40°).
+    const x = wide ? aspect * 3.28 * (0.8 - h * 0.08) + Math.cos(p * Math.PI * 3) * 0.4 + s.x * 0.3 : aspect * 3.28 * 1.12 + s.x * 0.1;
+    const y = wide ? Math.sin(p * Math.PI * 2) * 0.4 + s.y * 0.2 : 3.28 * (0.64 - h * 0.06 + scrollY / (innerHeight / 2)) + s.y * 0.1;
+    const scale = (0.85 - p * 0.2) * (0.65 + h * 0.35) * (wide ? 1 : 0.55);
+    // Fuera de cuadro (en celular, tras bajar del encabezado) no se dibuja: el canvas conserva el último cuadro, ya
+    // vacío, y el blur de las superficies encima deja de recalcularse en cada cuadro. Distancia del centro a los
+    // planos del frustum (cámara a 9, tan 20° = 0.364) contra la cota 3.6 × escala que usa el shader.
+    const R = 3.6 * scale, tv = 0.364, th = tv * aspect;
+    const visible = (Math.abs(y) - 9 * tv) / Math.hypot(1, tv) < R && (Math.abs(x) - 9 * th) / Math.hypot(1, th) < R;
+    if (!visible && !shown && !dirty) return;
+    shown = visible; dirty = false;
+    const [ax, ay] = [p * 3 - s.y * 0.4, t * 0.15 + p * 5 + s.x * 0.6];
+    const [cx, sx, cy, sy] = [Math.cos(ax), Math.sin(ax), Math.cos(ay), Math.sin(ay)];
+    gl.uniform2f(u.res, canvas.width, canvas.height);
+    gl.uniform1f(u.t, t);
+    // Lo empinado de cada loma es amp × freq: pasado ~0.8 aparecen goteos y pliegues, y más arriba se fragmenta.
+    // Techo suave: igual hasta el 70 % del techo y luego se acerca a 0.8 / freq sin pasarlo (scroll repetido incluido).
+    const freq = 1.1 + p * 1.6, top = 0.8 / freq, knee = top * 0.7;
+    const amp = 0.25 + pending * 0.03 + vel * 2.5 + Math.sin(p * 9) * 0.15;
+    gl.uniform1f(u.amp, amp < knee ? amp : knee + (top - knee) * Math.tanh((amp - knee) / (top - knee)));
+    gl.uniform1f(u.freq, freq);
+    gl.uniform1f(u.vapor, document.documentElement.classList.contains('vapor') ? 1 : 0);
+    gl.uniform1f(u.op, 0.5 + h * 0.5); // atenuada en dim; plena en hero
+    gl.uniform3f(u.lp, s.x * 1.6, s.y * 1.6, 0.9);
+    gl.uniform3f(u.pos, x, y, scale);
+    gl.uniformMatrix3fv(u.rot, false, [cy, sx * sy, -cx * sy, 0, cx, sx, sy, -sx * cy, cx * cy]); // Rx·Ry
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  // Tope de 60 fps: las constantes de arriba son por cuadro y en pantallas de 120 Hz la escultura iba al doble
+  // de velocidad y de costo. Se dibuja cuando cambia el "tic" de 1/60 s.
+  let slot = 0, drawn = performance.now();
+  const loop = (ts) => {
+    const now = Math.round(ts * 0.06);
+    if (now !== slot) {
+      slot = now;
+      // Entre 1 y 12 pasos (~100 ms): sin salto al volver de una pestaña oculta ni n ≤ 0 en el primer cuadro.
+      frame(Math.min(Math.max((ts - drawn) / (1000 / 120), 1), 12));
+      drawn = ts;
+    }
+    requestAnimationFrame(loop); // rAF ya se pausa con la pestaña oculta
+  };
+  frame();
+  if (!still) requestAnimationFrame(loop);
+  })();
+</script>

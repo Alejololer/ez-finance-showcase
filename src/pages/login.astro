@@ -1,0 +1,45 @@
+---
+import { actions, isInputError } from 'astro:actions';
+import Layout from '../layouts/Layout.astro';
+
+if (Astro.locals.userId) return Astro.redirect('/');
+
+const google = Astro.getActionResult(actions.google);
+if (google?.data?.url) return Astro.redirect(google.data.url);
+
+const login = Astro.getActionResult(actions.login);
+if (login?.data?.mode === 'login') return Astro.redirect('/');
+const fields = isInputError(login?.error) ? login.error.fields : {};
+const rejected = Astro.url.searchParams.get('error') === 'invitacion';
+---
+<Layout title="Finanzas" em="sin fricción." path="ez-finance — quito" sculpture="hero">
+  {login?.data?.mode === 'signup' && (
+    <p class="flash">te enviamos un correo para confirmar tu cuenta. ábrelo y vuelve a ingresar.</p>
+  )}
+  {/* .box y no .win: sobre la escultura hero el fondo negro de .win se ve como un recorte y el texto queda a ras. */}
+  <section class="box flex w-full max-w-md flex-col gap-5">
+    <h2 class="prompt">ingresar</h2>
+    <form method="POST" action={actions.login} class="flex flex-col gap-5">
+      <label class="label">Correo
+        <input class="input" type="email" name="email" required autocomplete="email" />
+        {fields.email && <span class="error">{fields.email[0]}</span>}
+      </label>
+      <label class="label">Contraseña
+        <input class="input" type="password" name="password" required minlength="6" autocomplete="current-password" />
+        {fields.password && <span class="error">{fields.password[0]}</span>}
+      </label>
+      {login?.error && !isInputError(login.error) && <p class="error">{login.error.message}</p>}
+      <div class="flex flex-wrap gap-2">
+        <button class="btn flex-1" name="mode" value="login" data-pending="ingresando…">ingresar</button>
+        <button class="btn-ghost flex-1" name="mode" value="signup" data-pending="creando…">crear cuenta</button>
+      </div>
+    </form>
+    {/* data-astro-reload: la respuesta redirige a Google (otro origen), el router no puede seguirla con fetch. */}
+    <form method="POST" action={actions.google} data-astro-reload>
+      <button class="btn-ghost w-full" data-pending="redirigiendo…">continuar con google</button>
+      {google?.error && <p class="error">{google.error.message}</p>}
+      {rejected && <p class="error">Ese correo no está invitado al piloto.</p>}
+    </form>
+    <p class="meta">piloto cerrado: solo correos invitados.</p>
+  </section>
+</Layout>
